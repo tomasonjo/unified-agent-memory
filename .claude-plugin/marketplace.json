@@ -1,0 +1,13 @@
+{
+  "name": "uam",
+  "owner": { "name": "Tomaz Bratanic" },
+  "metadata": { "description": "Unified Agent Memory plugin marketplace" },
+  "plugins": [
+    {
+      "name": "unified-agent-memory",
+      "version": "0.1.0",
+      "source": "./",
+      "description": "Lifecycle hook capture + system prompt injection (bundled default or versioned Neo4j prompt)."
+    }
+  ]
+}

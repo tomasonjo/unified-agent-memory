@@ -1,0 +1,8 @@
+{
+  "name": "unified-agent-memory",
+  "version": "0.1.0",
+  "description": "Unified agent memory, starter edition: lifecycle hook capture to JSONL plus system prompt injection with a bundled default or a versioned Neo4j-backed prompt.",
+  "author": { "name": "Tomaz Bratanic" },
+  "repository": "https://github.com/tomasonjo/unified-agent-memory",
+  "keywords": ["claude-code", "hooks", "memory", "neo4j", "system-prompt"]
+}
