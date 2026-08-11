@@ -95,47 +95,50 @@ def resolve_prompt(name: str) -> tuple[str, str, int | None]:
 
 
 def main() -> int:
-    load_env()
-
     try:
-        raw = sys.stdin.read()
-        payload = json.loads(raw) if raw.strip() else {}
-    except Exception:
-        payload = {}
+        load_env()
 
-    name = os.getenv("UAM_SYSTEM_PROMPT_NAME", "default")
-    prompt, source, version = resolve_prompt(name)
-    session_id = str(payload.get("session_id") or "unknown")
-    print(
-        f"[inject_system_prompt] injecting {name!r} from {source} "
-        f"({len(prompt)} chars) for session {session_id}",
-        file=sys.stderr,
-    )
+        try:
+            raw = sys.stdin.read()
+            payload = json.loads(raw) if raw.strip() else {}
+        except Exception:
+            payload = {}
 
-    output = {
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": prompt,
-        }
-    }
-    print(json.dumps(output))
-
-    # Record the injection in the session log, full content included, so
-    # the session can be reproduced from its record. Logging must never
-    # block the injection itself.
-    try:
-        append_session_record(
-            session_id,
-            "SystemPromptInjected",
-            {
-                "name": name,
-                "source": source,
-                "version": version,
-                "content": prompt,
-            },
+        name = os.getenv("UAM_SYSTEM_PROMPT_NAME", "default")
+        prompt, source, version = resolve_prompt(name)
+        session_id = str(payload.get("session_id") or "unknown")
+        print(
+            f"[inject_system_prompt] injecting {name!r} from {source} "
+            f"({len(prompt)} chars) for session {session_id}",
+            file=sys.stderr,
         )
-    except Exception as exc:
-        print(f"[inject_system_prompt] log failed: {exc}", file=sys.stderr)
+
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": prompt,
+            }
+        }
+        print(json.dumps(output))
+
+        # Record the injection in the session log, full content included,
+        # so the session can be reproduced from its record. Logging must
+        # never block the injection itself.
+        try:
+            append_session_record(
+                session_id,
+                "SystemPromptInjected",
+                {
+                    "name": name,
+                    "source": source,
+                    "version": version,
+                    "content": prompt,
+                },
+            )
+        except Exception as exc:
+            print(f"[inject_system_prompt] log failed: {exc}", file=sys.stderr)
+    except Exception as exc:  # hook must never crash the session
+        print(f"[inject_system_prompt] error: {exc}", file=sys.stderr)
     return 0
 
 

@@ -101,7 +101,12 @@ def append_session_record(session_id: str, event: str, payload: dict) -> Path:
     }
     directory = log_dir()
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{record['session_id']}.jsonl"
+    # The id comes from the hook payload and names a file, so anything
+    # path-like in it is neutralized before it touches the filesystem.
+    safe_id = "".join(
+        c if c.isalnum() or c in "-_." else "_" for c in record["session_id"]
+    ).strip(".") or "unknown"
+    path = directory / f"{safe_id}.jsonl"
     with path.open("a") as f:
         f.write(json.dumps(record, default=str) + "\n")
     return path

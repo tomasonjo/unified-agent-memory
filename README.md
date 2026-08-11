@@ -13,6 +13,13 @@ persistent memory system:
    a versioned prompt from a `(:SystemPrompt)` node in Neo4j, so the prompt
    becomes data you manage rather than text baked into the harness.
 
+It also ships two skills. `/orchestrate` turns the agent into a subagent
+orchestrator: recall memory before the work starts, route the relevant
+slice into each phase, and record what was learned at the end. `/recap`
+reads the capture log back through a bundled Python script: an index of
+recent sessions first, one session's timeline on demand, with each
+session checked against the graph's current `(:SystemPrompt)` version.
+
 This repo is the companion to the plugin chapter of the book. The full,
 self-learning system it grows into (typed memory, extraction, consolidation,
 recall) lives in the sister project,
@@ -32,6 +39,12 @@ hooks/
   seed_system_prompt.py    # write/version the prompt in Neo4j
 prompts/
   default_system_prompt.md # the bundled default prompt
+skills/
+  orchestrate/
+    SKILL.md             # on-demand skill: subagent orchestration
+  recap/
+    SKILL.md             # on-demand skill: recap past sessions
+    scripts/recap.py     # the script the skill runs (log + graph)
 ```
 
 ## Install
@@ -106,6 +119,42 @@ it does not have to stay static between sessions: edit the node, and every
 later session starts from the new prompt. That property is what later
 chapters build on, when the prompt starts being revised from accumulated
 memory instead of by hand.
+
+## The skills
+
+A skill is a named folder holding a `SKILL.md`: only its name and one-line
+description sit in context, and the full text loads when you run the skill
+by name or the model matches the task to the description.
+
+**`orchestrate`** is instructions, not code. It makes the agent delegate a
+multi-phase plan to subagents. Subagents start with an empty context, so
+the orchestrator's job is routing memory: recall what is relevant before
+the work, hand each phase only the slice it needs, verify evidence between
+phases, and record lessons when the last phase lands. Capture needs no
+help from the skill: `SubagentStart` and `SubagentStop` are among the
+events `log_event.py` already writes down.
+
+**`recap`** shows the other thing a skill can carry: an executable. Its
+`SKILL.md` is a few lines of discipline; the work lives in
+`scripts/recap.py`, run through uv like the injection hook because it
+talks to the same graph. With no arguments the script prints an index of
+recent sessions (id, start time, event count, tools used, first prompt);
+with a session id prefix it prints that session's timeline. It also asks
+Neo4j one question the log cannot answer alone: every session log records
+the prompt version it was injected with, and the script compares that
+against the current `(:SystemPrompt)` version, flagging sessions that ran
+on instructions the graph has since replaced (`started on default v3,
+graph now at v5`). Same failure posture as the injection hook: a short
+timeout, one quiet attempt, and no reachable graph means no flags rather
+than no index (plain python3 without the driver behaves the same). The
+discipline is about cost: index first, one timeline only when the
+question needs it, and never the raw JSONL into context, because the logs
+are long and the script exists so the agent does not pay for every line.
+
+The skill format and the pairing of memory hooks with skills follow
+[claude-mem](https://github.com/thedotmack/claude-mem), whose `do` and
+`mem-search` skills are worth reading; `recap` is the mem-search idea in
+miniature, a cheap index before expensive detail.
 
 ## Configuration
 
