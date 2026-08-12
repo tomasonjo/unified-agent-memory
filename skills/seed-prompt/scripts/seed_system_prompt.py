@@ -3,18 +3,19 @@
 # requires-python = ">=3.10"
 # dependencies = ["neo4j>=5.26.0"]
 # ///
-"""Seed or update a ``(:SystemPrompt {name})`` node in Neo4j.
+"""Skill script: seed or update a ``(:SystemPrompt {name})`` node in Neo4j.
 
-The prompt is static at runtime in the sense that the SessionStart hook only
-reads it. It does not have to stay static between sessions: re-run this
-script (or edit the node any other way) and every later session picks up the
-new content. Re-seeding identical content is a no-op; a content change bumps
-the version counter.
+Bundled with the seed-prompt skill and executed by the agent on explicit
+request, not by a hook. The prompt is static at runtime in the sense that
+the SessionStart hook only reads it. It does not have to stay static
+between sessions: re-run this script (or edit the node any other way) and
+every later session picks up the new content. Re-seeding identical content
+is a no-op; a content change bumps the version counter.
 
-Usage:
-    uv run --script hooks/seed_system_prompt.py                   # 'default' from prompts/default_system_prompt.md
-    uv run --script hooks/seed_system_prompt.py NAME              # NAME from prompts/default_system_prompt.md
-    uv run --script hooks/seed_system_prompt.py NAME --file FILE  # NAME from FILE
+Usage (paths relative to the plugin root):
+    uv run --script skills/seed-prompt/scripts/seed_system_prompt.py                   # 'default' from prompts/default_system_prompt.md
+    uv run --script skills/seed-prompt/scripts/seed_system_prompt.py NAME              # NAME from prompts/default_system_prompt.md
+    uv run --script skills/seed-prompt/scripts/seed_system_prompt.py NAME --file FILE  # NAME from FILE
 """
 
 from __future__ import annotations
@@ -24,9 +25,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-HOOK_DIR = Path(__file__).resolve().parent
-if str(HOOK_DIR) not in sys.path:
-    sys.path.insert(0, str(HOOK_DIR))
+HOOKS_DIR = Path(__file__).resolve().parents[3] / "hooks"
+if str(HOOKS_DIR) not in sys.path:
+    sys.path.insert(0, str(HOOKS_DIR))
 
 from common import load_env, neo4j_config, plugin_root  # noqa: E402
 

@@ -16,7 +16,8 @@ The Neo4j lookup uses a short connection timeout so an unreachable database
 delays session start by a moment instead of stalling it. The hook never
 fails the session: any error falls through to the bundled default.
 
-Seed or update the graph-backed prompt with ``hooks/seed_system_prompt.py``.
+Seed or update the graph-backed prompt with
+``skills/seed-prompt/scripts/seed_system_prompt.py``.
 """
 
 from __future__ import annotations
@@ -30,7 +31,8 @@ if str(HOOK_DIR) not in sys.path:
     sys.path.insert(0, str(HOOK_DIR))
 
 from common import (  # noqa: E402
-    append_session_record,
+    append_session_event,
+    in_llm_subprocess,
     load_env,
     neo4j_config,
     plugin_root,
@@ -96,6 +98,10 @@ def resolve_prompt(name: str) -> tuple[str, str, int | None]:
 
 def main() -> int:
     try:
+        # A headless helper call spawned by hooks/llm.py needs no persona;
+        # injecting one would only steer the helper prompt off course.
+        if in_llm_subprocess():
+            return 0
         load_env()
 
         try:
@@ -121,22 +127,22 @@ def main() -> int:
         }
         print(json.dumps(output))
 
-        # Record the injection in the session log, full content included,
-        # so the session can be reproduced from its record. Logging must
-        # never block the injection itself.
+        # Record the injection in the session's event chain, full content
+        # included, so the session can be reproduced from its record.
+        # Recording must never block the injection itself.
         try:
-            append_session_record(
+            append_session_event(
                 session_id,
                 "SystemPromptInjected",
                 {
-                    "name": name,
-                    "source": source,
-                    "version": version,
+                    "prompt_name": name,
+                    "prompt_source": source,
+                    "prompt_version": version,
                     "content": prompt,
                 },
             )
         except Exception as exc:
-            print(f"[inject_system_prompt] log failed: {exc}", file=sys.stderr)
+            print(f"[inject_system_prompt] record failed: {exc}", file=sys.stderr)
     except Exception as exc:  # hook must never crash the session
         print(f"[inject_system_prompt] error: {exc}", file=sys.stderr)
     return 0

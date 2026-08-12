@@ -1,7 +1,8 @@
 """Shared helpers for Unified Agent Memory hooks.
 
-Stdlib only, so every hook can import it whether it runs under plain
-python3 or as a PEP 723 uv script.
+Importable with the standard library alone; the Neo4j driver is imported
+lazily inside the functions that talk to the graph, so the module loads
+whether a hook runs under plain python3 or as a PEP 723 uv script.
 """
 
 from __future__ import annotations
@@ -10,11 +11,27 @@ import json
 import os
 import subprocess
 from datetime import datetime, timezone
+from hashlib import sha1
 from pathlib import Path
 
 
 def plugin_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+LLM_SUBPROCESS_SENTINEL = "UAM_IN_LLM_SUBPROCESS"
+
+
+def in_llm_subprocess() -> bool:
+    """True inside a ``claude -p`` spawned by hooks/llm.py.
+
+    Hooks must no-op when this is set: the nested session loads this
+    plugin's own hooks (non-bare mode is what makes subscription auth
+    work), so without the sentinel every helper call would be captured
+    as a session of its own, and a hook that both listens and spawns
+    would recurse.
+    """
+    return bool(os.environ.get(LLM_SUBPROCESS_SENTINEL))
 
 
 def _claude_account_email() -> str:
@@ -78,38 +95,101 @@ def data_dir() -> Path:
     return Path.home() / ".unified-agent-memory"
 
 
-def log_dir() -> Path:
-    override = os.getenv("UAM_LOG_DIR")
-    if override:
-        return Path(override).expanduser()
-    return data_dir() / "logs"
+def _ensure_session_schema(tx) -> None:
+    tx.run(
+        "CREATE CONSTRAINT IF NOT EXISTS FOR (s:Session) "
+        "REQUIRE s.session_id IS UNIQUE"
+    )
+    tx.run(
+        "CREATE CONSTRAINT IF NOT EXISTS FOR (e:SessionEvent) "
+        "REQUIRE e.event_id IS UNIQUE"
+    )
 
 
-def append_session_record(session_id: str, event: str, payload: dict) -> Path:
-    """Append one record to the per-session JSONL log.
+def _append_event(tx, session_id: str, event_props: dict) -> None:
+    tx.run(
+        """
+        MERGE (s:Session {session_id: $session_id})
+        ON CREATE SET s.created_at = datetime($timestamp)
+        SET s.user_id = $user_id
+        WITH s
+        OPTIONAL MATCH (dup:SessionEvent {event_id: $event_id})
+        WITH s, dup
+        WHERE dup IS NULL
+        CREATE (e:SessionEvent $event_props)
+        SET e.timestamp = datetime($timestamp)
+        CREATE (s)-[:HAS_EVENT]->(e)
+        WITH s, e
+        OPTIONAL MATCH (s)-[old_latest:LATEST_EVENT]->(prev:SessionEvent)
+        DELETE old_latest
+        WITH s, e, prev
+        FOREACH (_ IN CASE WHEN prev IS NOT NULL THEN [1] ELSE [] END |
+            CREATE (prev)-[:NEXT]->(e)
+        )
+        FOREACH (_ IN CASE WHEN prev IS NULL THEN [1] ELSE [] END |
+            CREATE (s)-[:FIRST_EVENT]->(e)
+        )
+        CREATE (s)-[:LATEST_EVENT]->(e)
+        """,
+        session_id=session_id,
+        user_id=event_props.get("user_id"),
+        timestamp=event_props.get("timestamp"),
+        event_id=event_props.get("event_id"),
+        event_props=event_props,
+    )
+
+
+def append_session_event(session_id: str, event_name: str, props: dict) -> str:
+    """Append one :SessionEvent to the per-session chain in Neo4j.
 
     Used by the capture hook for lifecycle events and by the injection
-    hook to record what it injected, so the session log holds both what
-    the session did and what it was given.
+    hook to record what it injected, so the session graph holds both what
+    the session did and what it was given. The graph shape mirrors the
+    meta-knowledge-graph sister project::
+
+        (:Session)-[:FIRST_EVENT]->(:SessionEvent)-[:NEXT]->(:SessionEvent)...
+        (:Session)-[:HAS_EVENT]->(every :SessionEvent)
+        (:Session)-[:LATEST_EVENT]->(the newest :SessionEvent)
+
+    The event id is a hash of the event's own content (timestamp excluded),
+    so the same payload delivered to two parallel hook configs collapses to
+    one node; the uniqueness constraint makes the dedupe atomic. Returns
+    the event id.
     """
-    record = {
-        "received_at": datetime.now(timezone.utc).isoformat(),
-        "event": event,
-        "session_id": session_id or "unknown",
-        "user_id": user_id(),
-        "payload": payload,
-    }
-    directory = log_dir()
-    directory.mkdir(parents=True, exist_ok=True)
-    # The id comes from the hook payload and names a file, so anything
-    # path-like in it is neutralized before it touches the filesystem.
-    safe_id = "".join(
-        c if c.isalnum() or c in "-_." else "_" for c in record["session_id"]
-    ).strip(".") or "unknown"
-    path = directory / f"{safe_id}.jsonl"
-    with path.open("a") as f:
-        f.write(json.dumps(record, default=str) + "\n")
-    return path
+    from neo4j import GraphDatabase
+
+    session_id = session_id or "unknown"
+    payload_sig = sha1(
+        json.dumps(props, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:16]
+    event_id = f"{session_id}:{event_name}:{payload_sig}"
+
+    event_props = {k: v for k, v in props.items() if v is not None}
+    event_props.update(
+        {
+            "event_id": event_id,
+            "event_name": event_name,
+            "session_id": session_id,
+            "user_id": user_id(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+    # Short timeouts on purpose: this runs on every lifecycle event, so an
+    # unreachable graph must cost a moment and one dropped event, never a
+    # stalled session. The small retry window still absorbs transient
+    # lock conflicts when parallel hooks write to the same session.
+    uri, user, password, database = neo4j_config()
+    with GraphDatabase.driver(
+        uri,
+        auth=(user, password),
+        connection_timeout=2.0,
+        max_transaction_retry_time=5.0,
+    ) as driver:
+        with driver.session(database=database) as session:
+            session.execute_write(_ensure_session_schema)
+            session.execute_write(_append_event, session_id, event_props)
+    return event_id
 
 
 # The only keys ever copied out of the env file. Whatever else the file
@@ -121,7 +201,12 @@ ENV_KEYS = (
     "NEO4J_PASSWORD",
     "NEO4J_DATABASE",
     "UAM_SYSTEM_PROMPT_NAME",
-    "UAM_LOG_DIR",
+    "UAM_LLM_BACKEND",
+    "UAM_LLM_MODEL",
+    "UAM_CLAUDE_CLI_MODEL",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
 )
 
 ENV_TEMPLATE = """\
@@ -134,7 +219,21 @@ ENV_TEMPLATE = """\
 # NEO4J_PASSWORD=password
 # NEO4J_DATABASE=neo4j
 # UAM_SYSTEM_PROMPT_NAME=default
-# UAM_LOG_DIR=~/.unified-agent-memory/logs
+
+# LLM used when a hook needs a completion. The default backend,
+# claude-cli, runs headless Claude Code (Haiku by default) on the
+# Claude subscription this machine is already logged in with, so
+# there is nothing to set up.
+# UAM_LLM_BACKEND=claude-cli
+# UAM_CLAUDE_CLI_MODEL=haiku
+
+# Set the backend to litellm to use any other provider instead: the
+# model is a LiteLLM model string, authenticated by the matching key.
+# UAM_LLM_BACKEND=litellm
+# UAM_LLM_MODEL=gpt-5.4-mini
+# OPENAI_API_KEY=
+# ANTHROPIC_API_KEY=
+# GEMINI_API_KEY=
 """
 
 

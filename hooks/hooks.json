@@ -1,5 +1,5 @@
 {
-  "description": "Unified Agent Memory hooks. Two independent concerns, each owned by one script: log_event.py captures every lifecycle event to a local JSONL file (stdlib only, runs with plain python3), and inject_system_prompt.py injects the agent's system prompt at session start (PEP 723 uv script; needs the neo4j driver only when a graph-backed prompt is configured). Resolves its own root: ${CLAUDE_PLUGIN_ROOT} when installed as a plugin, else ${CLAUDE_PROJECT_DIR} when running from a repo checkout.",
+  "description": "Unified Agent Memory hooks. Two independent concerns, each owned by one script: log_event.py captures every lifecycle event as a :SessionEvent chain in Neo4j, and inject_system_prompt.py injects the agent's system prompt at session start. Both are PEP 723 uv scripts that need the neo4j driver. Resolves its own root: ${CLAUDE_PLUGIN_ROOT} when installed as a plugin, else ${CLAUDE_PROJECT_DIR} when running from a repo checkout.",
   "hooks": {
     "SessionStart": [
       {
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; python3 \"$ROOT/hooks/log_event.py\""
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\""
           }
         ]
       }
@@ -25,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; python3 \"$ROOT/hooks/log_event.py\""
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\""
           }
         ]
       }
@@ -35,7 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; python3 \"$ROOT/hooks/log_event.py\""
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\""
           }
         ]
       }
@@ -45,7 +45,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; python3 \"$ROOT/hooks/log_event.py\""
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\""
           }
         ]
       }
@@ -55,7 +55,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; python3 \"$ROOT/hooks/log_event.py\""
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\""
           }
         ]
       }
@@ -65,7 +65,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; python3 \"$ROOT/hooks/log_event.py\""
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\""
           }
         ]
       }
@@ -75,7 +75,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; python3 \"$ROOT/hooks/log_event.py\""
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\""
           }
         ]
       }
@@ -85,7 +85,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; python3 \"$ROOT/hooks/log_event.py\""
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\""
           }
         ]
       }
@@ -95,7 +95,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; python3 \"$ROOT/hooks/log_event.py\""
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\""
           }
         ]
       }
@@ -105,7 +105,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; python3 \"$ROOT/hooks/log_event.py\""
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\""
           }
         ]
       }
@@ -115,7 +115,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; python3 \"$ROOT/hooks/log_event.py\""
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\""
           }
         ]
       }
