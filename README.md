@@ -92,8 +92,10 @@ jq -r '[.received_at, .event, .payload.tool_name // ""] | @tsv' \
   ~/.unified-agent-memory/logs/<session_id>.jsonl
 ```
 
-**`inject_system_prompt.py`** runs on SessionStart (startup, resume, and
-clear, not on compaction) and emits `additionalContext` JSON, which Claude
+**`inject_system_prompt.py`** runs on SessionStart (startup and clear,
+the sources whose conversation begins empty; a resumed session replays
+its transcript, injection included, and compaction carries a summary
+forward) and emits `additionalContext` JSON, which Claude
 Code places at the start of the conversation. Resolution order:
 
 1. Neo4j `(:SystemPrompt {name})`, name from `UAM_SYSTEM_PROMPT_NAME`
