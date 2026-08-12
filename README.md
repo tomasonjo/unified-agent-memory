@@ -36,7 +36,7 @@ hooks/
   common.py            # shared env loading, Neo4j config, event writer
   log_event.py         # capture: every event -> :SessionEvent chain in Neo4j
   inject_system_prompt.py  # recall: system prompt -> session context
-  llm.py               # LLM access: LiteLLM (any provider) or headless claude
+  llm.py               # background-agent LLM: headless claude (default) or LiteLLM
 prompts/
   default_system_prompt.md # the bundled default prompt
 skills/
@@ -182,10 +182,15 @@ NEO4J_DATABASE=neo4j
 UAM_SYSTEM_PROMPT_NAME=default
 ```
 
-### LLM backend
+### Background-agent LLM
 
-When a hook needs a completion of its own it goes through one entry
-point, `llm_complete()` in `hooks/llm.py`, behind one switch:
+Capture and injection are plain database reads and writes, but the
+plugin's background agents need a model of their own: memory extraction
+at stop, consolidation of accumulated learnings, and similar jobs that
+hooks kick off around the session. This setting is for them only; the
+model answering your interactive session is unaffected. Every
+background call goes through one entry point, `llm_complete()` in
+`hooks/llm.py`, behind one switch:
 
 **Default: `claude-cli`, nothing to set up.** Hooks run headless Claude
 Code (`claude -p`), which authenticates with the same Claude login as

@@ -220,7 +220,9 @@ ENV_TEMPLATE = """\
 # NEO4J_DATABASE=neo4j
 # UAM_SYSTEM_PROMPT_NAME=default
 
-# LLM used when a hook needs a completion. The default backend,
+# LLM for the plugin's background agents (memory extraction,
+# consolidation, and similar hook-driven jobs); the model answering
+# the interactive session is unaffected. The default backend,
 # claude-cli, runs headless Claude Code (Haiku by default) on the
 # Claude subscription this machine is already logged in with, so
 # there is nothing to set up.

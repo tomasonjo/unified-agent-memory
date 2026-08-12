@@ -3,7 +3,13 @@
 # requires-python = ">=3.10"
 # dependencies = ["litellm>=1.0", "tenacity>=8.0"]
 # ///
-"""LLM access for Unified Agent Memory hooks.
+"""LLM access for Unified Agent Memory's background agents.
+
+The interactive session already has a model; this module is not for it.
+It serves the plugin's background jobs, the ones hooks kick off around
+the session: memory extraction at stop, consolidation of what
+accumulated, and similar work that needs a completion of its own
+without touching the conversation.
 
 One entry point, :func:`llm_complete`, behind one backend knob
 (``UAM_LLM_BACKEND``):
