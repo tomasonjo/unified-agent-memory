@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from datetime import datetime, timezone
 from hashlib import sha1
 from pathlib import Path
@@ -95,15 +96,45 @@ def data_dir() -> Path:
     return Path.home() / ".unified-agent-memory"
 
 
-def _ensure_session_schema(tx) -> None:
-    tx.run(
-        "CREATE CONSTRAINT IF NOT EXISTS FOR (s:Session) "
-        "REQUIRE s.session_id IS UNIQUE"
-    )
-    tx.run(
-        "CREATE CONSTRAINT IF NOT EXISTS FOR (e:SessionEvent) "
-        "REQUIRE e.event_id IS UNIQUE"
-    )
+# Named on purpose. An unnamed constraint gets a name Neo4j derives from
+# its schema, and that same derived name is given to the backing index —
+# so the two are only ever addressable by a hash the plugin never chose.
+SESSION_SCHEMA = (
+    (
+        "uam_session_id",
+        "CREATE CONSTRAINT uam_session_id IF NOT EXISTS "
+        "FOR (s:Session) REQUIRE s.session_id IS UNIQUE",
+    ),
+    (
+        "uam_session_event_id",
+        "CREATE CONSTRAINT uam_session_event_id IF NOT EXISTS "
+        "FOR (e:SessionEvent) REQUIRE e.event_id IS UNIQUE",
+    ),
+)
+
+
+def _ensure_session_schema(session) -> None:
+    """Create the uniqueness constraints, tolerating pre-existing schema.
+
+    Each statement gets its own transaction. Schema commands do not
+    compose into one atomic unit the way writes do, so folding both into
+    a single ``execute_write`` means a failure on the second rolls back
+    the first and the graph ends up with neither constraint.
+
+    Failures are reported and swallowed rather than raised. ``IF NOT
+    EXISTS`` covers an existing constraint, but not a leftover backing
+    index whose owning constraint was dropped: the index keeps the
+    derived name, and the next create collides with it under a name
+    nothing here asked for. The constraints are a guard on the dedupe in
+    ``_append_event``, not the payload — that query already filters
+    duplicates on its own, so a missing constraint costs atomicity under
+    concurrent writes, never the event itself.
+    """
+    for name, statement in SESSION_SCHEMA:
+        try:
+            session.run(statement).consume()
+        except Exception as exc:
+            print(f"[uam] schema: {name} not created: {exc}", file=sys.stderr)
 
 
 def _append_event(tx, session_id: str, event_props: dict) -> None:
@@ -188,7 +219,7 @@ def append_session_event(session_id: str, event_name: str, props: dict) -> str:
         max_transaction_retry_time=5.0,
     ) as driver:
         with driver.session(database=database) as session:
-            session.execute_write(_ensure_session_schema)
+            _ensure_session_schema(session)
             session.execute_write(_append_event, session_id, event_props)
     return event_id
 

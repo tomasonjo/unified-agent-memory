@@ -21,6 +21,12 @@ slice into each phase, and record what was learned at the end.
 node, on explicit request only, checking what the graph already holds
 and confirming with you before it writes.
 
+And it mounts the graph back into the session as tools: `mcp.json`
+runs the [official Neo4j MCP server](https://github.com/neo4j/mcp) in
+read-only mode, so the model can pull from the same graph the hooks
+push into — introspect the schema and run read Cypher — while the
+write path stays with the hooks and the seed skill.
+
 This repo is the companion to the plugin chapter of the book. The full,
 self-learning system it grows into (typed memory, extraction, consolidation,
 recall) lives in the sister project,
@@ -46,7 +52,15 @@ skills/
   seed-prompt/
     SKILL.md             # on-demand skill: check the graph, confirm, publish the prompt
     scripts/seed_system_prompt.py  # status + versioned write of the prompt node
+mcp/
+  run_neo4j_mcp.py       # launcher: canonical env -> official Neo4j MCP server, read-only
+mcp.json                 # mounts the server above under the name "neo4j"
 ```
+
+`mcp.json` carries the file name the
+[Agent Plugins Specification](https://agent-plugins.org/specification)
+standardizes rather than Claude Code's default `.mcp.json`; one line in
+`plugin.json` (`"mcpServers": "./mcp.json"`) wires it in.
 
 ## Install
 
@@ -69,6 +83,8 @@ PEP 723 scripts; uv builds a tiny cached environment with the Neo4j driver
 on first run) and a reachable Neo4j for event capture. Without Neo4j the
 plugin still runs: the bundled default prompt is injected, and capture
 reports to stderr and drops the event instead of blocking the session.
+The read-only MCP mount additionally needs APOC (`meta` component)
+installed in the database; without it the mount alone is lost.
 
 ## What each hook does
 
@@ -171,6 +187,34 @@ The skill format and the pairing of memory hooks with skills follow
 [claude-mem](https://github.com/thedotmack/claude-mem), whose `do` and
 `mem-search` skills are worth reading.
 
+## The graph as tools (read-only MCP mount)
+
+The hooks are a push channel: the record flows out because events fire.
+`mcp.json` adds the pull channel back in: it mounts the
+[official Neo4j MCP server](https://github.com/neo4j/mcp) under the
+name `neo4j`, so the model can query the same graph the hooks write to
+— ask "what did I do in my last session?" and the agent introspects the
+schema, then walks the session chain with the timeline query above.
+Those tool calls are lifecycle events like any other, so recall itself
+lands in the record.
+
+The mount is read-only by construction. `mcp.json` does not launch the
+server directly; it runs `mcp/run_neo4j_mcp.py`, a uv script that loads
+the same canonical env file the hooks read (exported variables win,
+whitelist only), resolves the same connection defaults, pins
+`NEO4J_READ_ONLY=true`, and execs the server. With that flag the server
+never announces its `write-cypher` tool at all — enforcement at the
+server, stronger than a harness-side permission — leaving `get-schema`
+and `read-cypher` (plus a GDS procedure listing when the database has
+GDS installed). The model reads; writing belongs to the hooks and the
+seed-prompt skill.
+
+The server needs the APOC plugin (its `meta` component) available in
+the database for schema introspection; Aura and APOC-enabled local
+installs qualify. Without it the server exits at startup and the mount
+costs only its own feature: the session runs, capture and injection are
+unaffected, and the tools are simply absent.
+
 ## Configuration
 
 Configuration follows the
@@ -270,3 +314,8 @@ Resolution rules:
 - **The prompt is data.** Moving the system prompt into the graph turns
   "edit a config file on every machine" into "update one node that every
   session, on any harness wired to the same store, reads at startup".
+- **Reads for the model, writes for the hooks.** The MCP mount gives the
+  model schema introspection and read Cypher only, pinned read-only in
+  the launcher so the server never even announces a write tool. Every
+  write into the graph goes through code — capture, injection's record,
+  the seed skill — never through the model's judgment.

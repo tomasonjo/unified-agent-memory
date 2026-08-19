@@ -1,7 +1,7 @@
 {
   "name": "unified-agent-memory",
   "version": "0.1.0",
-  "description": "A unified agent memory layer for multiple agent harnesses.",
+  "description": "Agent memory that works without being asked: capture every session event, and start each session from standing instructions, bundled or versioned in Neo4j.",
   "author": {
     "name": "Tomaz Bratanic"
   },
@@ -12,5 +12,6 @@
     "memory",
     "neo4j",
     "system-prompt"
-  ]
+  ],
+  "mcpServers": "./mcp.json"
 }
