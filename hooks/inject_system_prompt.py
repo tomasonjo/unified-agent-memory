@@ -8,7 +8,7 @@
 Resolution order:
 
 1. Neo4j ``(:SystemPrompt {name})`` node, when a graph is reachable. The
-   active name comes from ``UAM_SYSTEM_PROMPT_NAME`` (default ``default``).
+   active name comes from ``UAM_AGENT_NAME`` (default ``default``).
 2. The bundled ``prompts/default_system_prompt.md`` file.
 3. A minimal embedded constant, so the hook always has something to inject.
 
@@ -36,7 +36,9 @@ from common import (  # noqa: E402
     load_env,
     neo4j_config,
     plugin_root,
+    set_event_props,
 )
+from log_event import build_event_props  # noqa: E402
 
 import os  # noqa: E402
 
@@ -110,7 +112,7 @@ def main() -> int:
         except Exception:
             payload = {}
 
-        name = os.getenv("UAM_SYSTEM_PROMPT_NAME", "default")
+        name = os.getenv("UAM_AGENT_NAME", "default")
         prompt, source, version = resolve_prompt(name)
         session_id = str(payload.get("session_id") or "unknown")
         print(
@@ -127,18 +129,27 @@ def main() -> int:
         }
         print(json.dumps(output))
 
-        # Record the injection in the session's event chain, full content
-        # included, so the session can be reproduced from its record.
-        # Recording must never block the injection itself.
+        # Record the injection on the SessionStart event itself, full
+        # content included, so the session can be reproduced from its
+        # record. The injection is not a lifecycle event, so nothing new
+        # enters the chain: this hook appends the same SessionStart event
+        # the capture hook does (the shared content hash collapses the two
+        # writes into one node, whichever hook lands first) and then sets
+        # the injection's properties on that node. Recording must never
+        # block the injection itself.
         try:
-            append_session_event(
+            event_id = append_session_event(
                 session_id,
-                "SystemPromptInjected",
+                str(payload.get("hook_event_name") or "SessionStart"),
+                build_event_props(payload),
+            )
+            set_event_props(
+                event_id,
                 {
                     "prompt_name": name,
                     "prompt_source": source,
                     "prompt_version": version,
-                    "content": prompt,
+                    "prompt_content": prompt,
                 },
             )
         except Exception as exc:

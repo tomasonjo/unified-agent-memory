@@ -16,6 +16,12 @@ Usage (paths relative to the plugin root):
     uv run --script skills/seed-prompt/scripts/seed_system_prompt.py                   # 'default' from prompts/default_system_prompt.md
     uv run --script skills/seed-prompt/scripts/seed_system_prompt.py NAME              # NAME from prompts/default_system_prompt.md
     uv run --script skills/seed-prompt/scripts/seed_system_prompt.py NAME --file FILE  # NAME from FILE
+    uv run --script skills/seed-prompt/scripts/seed_system_prompt.py --status          # read-only: report what seeding would do
+
+``--status`` writes nothing. It reports whether the node exists, its
+version, and whether the source content differs, in one deterministic
+line, so a caller can look before writing and put a human decision
+between the two.
 """
 
 from __future__ import annotations
@@ -69,10 +75,51 @@ def upsert_prompt(tx, name: str, content: str, now: str) -> dict:
     return {"action": str(record["action"]), "version": int(record["version"])}
 
 
+def fetch_current(driver, database: str, name: str) -> dict | None:
+    records, _, _ = driver.execute_query(
+        "MATCH (p:SystemPrompt {name: $name}) "
+        "RETURN p.content AS content, p.version AS version LIMIT 1",
+        name=name,
+        database_=database,
+    )
+    if not records or records[0].get("content") is None:
+        return None
+    version = records[0].get("version")
+    return {
+        "content": str(records[0]["content"]),
+        "version": int(version) if version is not None else 1,
+    }
+
+
+def status_line(name: str, source_name: str, content: str, current: dict | None) -> str:
+    label = f"(:SystemPrompt {{name: '{name}'}})"
+    if current is None:
+        return (
+            f"No {label} in the graph; seeding from {source_name} "
+            f"would create v1 ({len(content)} chars)."
+        )
+    version = current["version"]
+    if current["content"] == content:
+        return (
+            f"{label} is at v{version}; {source_name} is identical "
+            f"({len(content)} chars), re-seeding would change nothing."
+        )
+    return (
+        f"{label} is at v{version} ({len(current['content'])} chars); "
+        f"{source_name} differs ({len(content)} chars), "
+        f"seeding would bump to v{version + 1}."
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("name", nargs="?", default="default")
     parser.add_argument("--file", type=Path, default=None)
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="read-only: report what seeding would do, writing nothing",
+    )
     args = parser.parse_args()
 
     source = args.file or (plugin_root() / "prompts" / "default_system_prompt.md")
@@ -83,6 +130,13 @@ def main() -> int:
     from neo4j import GraphDatabase
 
     uri, user, password, database = neo4j_config()
+
+    if args.status:
+        with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+            current = fetch_current(driver, database, args.name)
+        print(status_line(args.name, source.name, content, current))
+        return 0
+
     now = datetime.now(timezone.utc).isoformat()
 
     with GraphDatabase.driver(uri, auth=(user, password)) as driver:

@@ -1,8 +1,16 @@
 {
   "name": "unified-agent-memory",
   "version": "0.1.0",
-  "description": "Agent memory that works without being asked: capture every session event, and start each session from standing instructions, bundled or versioned in Neo4j.",
-  "author": { "name": "Tomaz Bratanic" },
+  "description": "A unified agent memory layer for multiple agent harnesses.",
+  "author": {
+    "name": "Tomaz Bratanic"
+  },
   "repository": "https://github.com/tomasonjo/unified-agent-memory",
-  "keywords": ["claude-code", "hooks", "memory", "neo4j", "system-prompt"]
+  "keywords": [
+    "claude-code",
+    "hooks",
+    "memory",
+    "neo4j",
+    "system-prompt"
+  ]
 }

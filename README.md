@@ -18,7 +18,8 @@ It also ships two skills. `/orchestrate` turns the agent into a subagent
 orchestrator: recall memory before the work starts, route the relevant
 slice into each phase, and record what was learned at the end.
 `/seed-prompt` publishes the system prompt to the graph as a versioned
-node, on explicit request only.
+node, on explicit request only, checking what the graph already holds
+and confirming with you before it writes.
 
 This repo is the companion to the plugin chapter of the book. The full,
 self-learning system it grows into (typed memory, extraction, consolidation,
@@ -43,8 +44,8 @@ skills/
   orchestrate/
     SKILL.md             # on-demand skill: subagent orchestration
   seed-prompt/
-    SKILL.md             # on-demand skill: publish the prompt to Neo4j
-    scripts/seed_system_prompt.py  # write/version the prompt node
+    SKILL.md             # on-demand skill: check the graph, confirm, publish the prompt
+    scripts/seed_system_prompt.py  # status + versioned write of the prompt node
 ```
 
 ## Install
@@ -89,9 +90,13 @@ shape the record. Tool results are not stored: they are the bulk of a
 session and regenerable, so the record keeps only that the tool ran, what
 it was asked, and how many characters came back (`tool_response_chars`).
 Inputs are stored: prompts and tool inputs (bounded at 4,000 characters),
-and every injection the plugin makes is appended to the same chain as a
-`SystemPromptInjected` event with the full injected content, so a session
-can be reproduced from its record. Every `(:Session)` and `(:SessionEvent)`
+and what the injection hook injected is recorded on the `SessionStart`
+event itself (`prompt_name`, `prompt_source`, `prompt_version`, and the
+full `prompt_content`), so a session can be reproduced from its record.
+Injection is not a lifecycle event, so nothing invented enters the chain:
+the injection hook appends the same `SessionStart` event the capture hook
+does, the shared content hash collapses the two writes into one node, and
+the injection's properties are set on that node. Every `(:Session)` and `(:SessionEvent)`
 is also stamped with a `user_id`, an email address resolved at runtime:
 the account logged in to the harness (Claude Code keeps it in its local
 config JSON), falling back to `git config user.email`. Sessions have
@@ -111,14 +116,15 @@ its transcript, injection included, and compaction carries a summary
 forward) and emits `additionalContext` JSON, which Claude
 Code places at the start of the conversation. Resolution order:
 
-1. Neo4j `(:SystemPrompt {name})`, name from `UAM_SYSTEM_PROMPT_NAME`
+1. Neo4j `(:SystemPrompt {name})`, name from `UAM_AGENT_NAME`
    (default `default`), when a graph is reachable,
 2. the bundled `prompts/default_system_prompt.md`,
 3. a minimal embedded constant.
 
 Any failure falls through to the next source; the hook never blocks a
 session, and the Neo4j lookup uses a short connection timeout so an
-unreachable database cannot stall startup.
+unreachable database cannot stall startup. What it injected it records
+on the session's `SessionStart` event, full text included.
 
 ## The skills
 
@@ -137,11 +143,16 @@ events `log_event.py` already writes down.
 **`seed-prompt`** shows the other thing a skill can carry: an
 executable. Its `SKILL.md` is a few lines of discipline; the work lives
 in a bundled script run through uv like the injection hook, because it
-talks to the same graph. It is the write side of the prompt story. Invoked
-explicitly (`/seed-prompt`), it pushes a prompt into the graph through
-its bundled script:
+talks to the same graph. It is the write side of the prompt story, and
+it looks before it writes. Invoked explicitly (`/seed-prompt`), the
+skill first runs the script with `--status`, a read-only flag that
+reports what the graph already holds (no node yet, identical content,
+or content that differs and would bump the version), relays that to the
+user, and asks before creating or overwriting anything. Only on an
+explicit yes does it seed:
 
 ```
+uv run --script skills/seed-prompt/scripts/seed_system_prompt.py --status
 uv run --script skills/seed-prompt/scripts/seed_system_prompt.py
 uv run --script skills/seed-prompt/scripts/seed_system_prompt.py reviewer --file prompts/reviewer.md
 ```
@@ -179,7 +190,7 @@ NEO4J_URI=bolt://localhost:7687
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=password
 NEO4J_DATABASE=neo4j
-UAM_SYSTEM_PROMPT_NAME=default
+UAM_AGENT_NAME=default
 ```
 
 ### Background-agent LLM

@@ -20,8 +20,8 @@ Storage decisions:
   regenerable packaging; the record keeps that the tool ran, what it was
   asked, and how many characters came back (``tool_response_chars``).
 - Inputs are stored: prompts and tool inputs (bounded at 4,000 chars), and
-  the injection hook appends what it injected to the same chain, so a
-  session can be reproduced from its record.
+  the injection hook records what it injected on the SessionStart event,
+  so a session can be reproduced from its record.
 - Every :Session and :SessionEvent is stamped with a ``user_id`` (an email
   address, resolved from the harness's logged-in account, then the
   machine's git configuration), so sessions have owners and later

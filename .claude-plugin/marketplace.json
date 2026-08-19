@@ -1,13 +1,17 @@
 {
   "name": "uam",
-  "owner": { "name": "Tomaz Bratanic" },
-  "metadata": { "description": "Unified Agent Memory plugin marketplace" },
+  "owner": {
+    "name": "Tomaz Bratanic"
+  },
+  "metadata": {
+    "description": "Unified Agent Memory plugin marketplace"
+  },
   "plugins": [
     {
       "name": "unified-agent-memory",
       "version": "0.1.0",
       "source": "./",
-      "description": "Agent memory that works without being asked: capture every session event, and start each session from standing instructions, bundled or versioned in Neo4j."
+      "description": "A unified agent memory layer for multiple agent harnesses."
     }
   ]
 }

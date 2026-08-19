@@ -142,10 +142,11 @@ def _append_event(tx, session_id: str, event_props: dict) -> None:
 def append_session_event(session_id: str, event_name: str, props: dict) -> str:
     """Append one :SessionEvent to the per-session chain in Neo4j.
 
-    Used by the capture hook for lifecycle events and by the injection
-    hook to record what it injected, so the session graph holds both what
-    the session did and what it was given. The graph shape mirrors the
-    meta-knowledge-graph sister project::
+    Only harness lifecycle events become chain entries. The injection
+    hook appends the same SessionStart event the capture hook does (the
+    shared content hash collapses the two writes into one node) and then
+    records what it injected on that node via ``set_event_props``. The
+    graph shape mirrors the meta-knowledge-graph sister project::
 
         (:Session)-[:FIRST_EVENT]->(:SessionEvent)-[:NEXT]->(:SessionEvent)...
         (:Session)-[:HAS_EVENT]->(every :SessionEvent)
@@ -192,6 +193,40 @@ def append_session_event(session_id: str, event_name: str, props: dict) -> str:
     return event_id
 
 
+def set_event_props(event_id: str, props: dict) -> None:
+    """Set additional properties on an already-appended :SessionEvent.
+
+    The injection hook uses this to record what it injected on the
+    SessionStart event itself: the injection is not a lifecycle event,
+    the harness never announces one for it, so it must not appear in the
+    chain under a name of its own. It is something that happened at
+    session start, and the record keeps it there.
+    """
+    from neo4j import GraphDatabase
+
+    props = {k: v for k, v in props.items() if v is not None}
+    if not props:
+        return
+    uri, user, password, database = neo4j_config()
+    with GraphDatabase.driver(
+        uri,
+        auth=(user, password),
+        connection_timeout=2.0,
+        max_transaction_retry_time=5.0,
+    ) as driver:
+        with driver.session(database=database) as session:
+
+            def _set_props(tx):
+                tx.run(
+                    "MATCH (e:SessionEvent {event_id: $event_id}) "
+                    "SET e += $props",
+                    event_id=event_id,
+                    props=props,
+                ).consume()
+
+            session.execute_write(_set_props)
+
+
 # The only keys ever copied out of the env file. Whatever else the file
 # contains stays in the file; a stray or typo'd key can never reach the
 # process environment.
@@ -200,7 +235,7 @@ ENV_KEYS = (
     "NEO4J_USERNAME",
     "NEO4J_PASSWORD",
     "NEO4J_DATABASE",
-    "UAM_SYSTEM_PROMPT_NAME",
+    "UAM_AGENT_NAME",
     "UAM_LLM_BACKEND",
     "UAM_LLM_MODEL",
     "UAM_CLAUDE_CLI_MODEL",
@@ -218,7 +253,7 @@ ENV_TEMPLATE = """\
 # NEO4J_USERNAME=neo4j
 # NEO4J_PASSWORD=password
 # NEO4J_DATABASE=neo4j
-# UAM_SYSTEM_PROMPT_NAME=default
+# UAM_AGENT_NAME=default
 
 # LLM for the plugin's background agents (memory extraction,
 # consolidation, and similar hook-driven jobs); the model answering
