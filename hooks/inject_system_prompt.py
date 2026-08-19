@@ -9,7 +9,7 @@ Resolution order:
 
 1. Neo4j ``(:SystemPrompt {name})`` node, when a graph is reachable. The
    active name comes from ``UAM_AGENT_NAME`` (default ``default``).
-2. The bundled ``prompts/default_system_prompt.md`` file.
+2. The bundled ``hooks/default_system_prompt.md`` file.
 3. A minimal embedded constant, so the hook always has something to inject.
 
 The Neo4j lookup uses a short connection timeout so an unreachable database
@@ -35,7 +35,6 @@ from common import (  # noqa: E402
     in_llm_subprocess,
     load_env,
     neo4j_config,
-    plugin_root,
     set_event_props,
 )
 from log_event import build_event_props  # noqa: E402
@@ -78,7 +77,7 @@ def fetch_prompt_from_neo4j(name: str) -> tuple[str, int | None] | None:
 
 
 def read_bundled_prompt() -> str | None:
-    path = plugin_root() / "prompts" / "default_system_prompt.md"
+    path = HOOK_DIR / "default_system_prompt.md"
     try:
         content = path.read_text()
     except OSError:

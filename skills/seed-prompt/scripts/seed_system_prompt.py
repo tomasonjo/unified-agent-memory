@@ -13,8 +13,8 @@ every later session picks up the new content. Re-seeding identical content
 is a no-op; a content change bumps the version counter.
 
 Usage (paths relative to the plugin root):
-    uv run --script skills/seed-prompt/scripts/seed_system_prompt.py                   # 'default' from prompts/default_system_prompt.md
-    uv run --script skills/seed-prompt/scripts/seed_system_prompt.py NAME              # NAME from prompts/default_system_prompt.md
+    uv run --script skills/seed-prompt/scripts/seed_system_prompt.py                   # 'default' from hooks/default_system_prompt.md
+    uv run --script skills/seed-prompt/scripts/seed_system_prompt.py NAME              # NAME from hooks/default_system_prompt.md
     uv run --script skills/seed-prompt/scripts/seed_system_prompt.py NAME --file FILE  # NAME from FILE
     uv run --script skills/seed-prompt/scripts/seed_system_prompt.py --status          # read-only: report what seeding would do
 
@@ -122,7 +122,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    source = args.file or (plugin_root() / "prompts" / "default_system_prompt.md")
+    source = args.file or (plugin_root() / "hooks" / "default_system_prompt.md")
     content = source.read_text()
 
     load_env()

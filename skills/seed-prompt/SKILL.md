@@ -11,7 +11,7 @@ writing, put the decision to the user, then report exactly what
 happened. Follow the steps in order; never skip the check.
 
 Step 1: identify the source. With no arguments the script works with
-the plugin's bundled `prompts/default_system_prompt.md` under the name
+the plugin's bundled `hooks/default_system_prompt.md` under the name
 `default`; a name and `--file` select other content. If the user points
 at a file, read it first and confirm it is the content they mean to
 publish.

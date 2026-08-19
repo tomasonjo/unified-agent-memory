@@ -43,9 +43,8 @@ hooks/
   common.py            # shared env loading, Neo4j config, event writer
   log_event.py         # capture: every event -> :SessionEvent chain in Neo4j
   inject_system_prompt.py  # recall: system prompt -> session context
+  default_system_prompt.md # the bundled default prompt (injection's fallback)
   llm.py               # background-agent LLM: headless claude (default) or LiteLLM
-prompts/
-  default_system_prompt.md # the bundled default prompt
 skills/
   orchestrate/
     SKILL.md             # on-demand skill: subagent orchestration
@@ -134,7 +133,7 @@ Code places at the start of the conversation. Resolution order:
 
 1. Neo4j `(:SystemPrompt {name})`, name from `UAM_AGENT_NAME`
    (default `default`), when a graph is reachable,
-2. the bundled `prompts/default_system_prompt.md`,
+2. the bundled `hooks/default_system_prompt.md`,
 3. a minimal embedded constant.
 
 Any failure falls through to the next source; the hook never blocks a
@@ -170,7 +169,7 @@ explicit yes does it seed:
 ```
 uv run --script skills/seed-prompt/scripts/seed_system_prompt.py --status
 uv run --script skills/seed-prompt/scripts/seed_system_prompt.py
-uv run --script skills/seed-prompt/scripts/seed_system_prompt.py reviewer --file prompts/reviewer.md
+uv run --script skills/seed-prompt/scripts/seed_system_prompt.py reviewer --file path/to/reviewer.md
 ```
 
 The node keeps `content`, `version`, `created_at`, and `updated_at`.
