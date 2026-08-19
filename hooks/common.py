@@ -94,6 +94,35 @@ def harness() -> str:
     return os.getenv("UAM_HARNESS", "claude-code")
 
 
+def _transcript_model(transcript_path) -> str:
+    """Model of the last assistant message in the session transcript.
+
+    The transcript is the harness's own record of the conversation, one
+    JSON object per line, and every assistant message names the model
+    that produced it. Only the tail is read: the latest answer is the
+    one that matters, and a hook that runs on every event cannot afford
+    to reread a long session each time.
+    """
+    if not transcript_path:
+        return ""
+    try:
+        size = os.path.getsize(transcript_path)
+        with open(transcript_path, "rb") as f:
+            if size > 65536:
+                f.seek(size - 65536)
+            tail = f.read().decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+    for line in reversed(tail.splitlines()):
+        try:
+            message = json.loads(line).get("message")
+        except Exception:
+            continue
+        if isinstance(message, dict) and message.get("model"):
+            return str(message["model"])
+    return ""
+
+
 def data_dir() -> Path:
     """Root of the plugin's user-level state.
 
@@ -153,7 +182,8 @@ def _append_event(tx, session_id: str, event_props: dict) -> None:
         """
         MERGE (s:Session {session_id: $session_id})
         ON CREATE SET s.created_at = datetime($timestamp)
-        SET s.user_id = $user_id, s.harness = $harness
+        SET s.user_id = $user_id, s.harness = $harness,
+            s.model = coalesce($model, s.model)
         WITH s
         OPTIONAL MATCH (dup:SessionEvent {event_id: $event_id})
         WITH s, dup
@@ -176,6 +206,9 @@ def _append_event(tx, session_id: str, event_props: dict) -> None:
         session_id=session_id,
         user_id=event_props.get("user_id"),
         harness=harness(),
+        model=event_props.get("model")
+        or _transcript_model(event_props.get("transcript_path"))
+        or None,
         timestamp=event_props.get("timestamp"),
         event_id=event_props.get("event_id"),
         event_props=event_props,

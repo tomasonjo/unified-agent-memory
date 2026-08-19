@@ -19,7 +19,7 @@ Storage decisions:
 - Tool results are NOT stored. They are the bulk of a session and they are
   regenerable packaging; the record keeps that the tool ran, what it was
   asked, and how many characters came back (``tool_response_chars``).
-- Inputs are stored: prompts and tool inputs (bounded at 4,000 chars), and
+- Inputs are stored: prompts and tool inputs (bounded at 8,000 chars), and
   the injection hook records what it injected on the SessionStart event,
   so a session can be reproduced from its record.
 - Every :Session and :SessionEvent is stamped with a ``user_id`` (an email
@@ -28,7 +28,10 @@ Storage decisions:
   user-scoped memory has a stable key.
 - Every :Session is also stamped with the ``harness`` it came from
   (``claude-code`` here; UAM_HARNESS overrides for ports), so a store
-  collecting sessions from several harnesses keeps their origins apart.
+  collecting sessions from several harnesses keeps their origins apart,
+  and with the ``model`` that did the work: the SessionStart payload
+  when it announces one, else the last assistant message in the
+  harness's own transcript.
 
 Graph properties are flat, so ``tool_input`` is serialized to a JSON
 string before storage. Connection details come from the NEO4J_* settings
@@ -49,7 +52,7 @@ if str(HOOK_DIR) not in sys.path:
 
 from common import append_session_event, in_llm_subprocess, load_env  # noqa: E402
 
-MAX_FIELD_CHARS = 4000
+MAX_FIELD_CHARS = 8000
 TRUNCATED_FIELDS = ("tool_input", "prompt", "last_assistant_message")
 
 
