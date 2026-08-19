@@ -83,6 +83,17 @@ def user_id() -> str:
     return _claude_account_email() or _git_email() or "unknown"
 
 
+def harness() -> str:
+    """Name of the harness this capture is wired into.
+
+    No lookup needed: hook registration is harness-specific by
+    construction, so the script knows where it runs the way it knows its
+    own filename. The env override is for ports — wire the same script
+    into another harness and set UAM_HARNESS in that hook configuration.
+    """
+    return os.getenv("UAM_HARNESS", "claude-code")
+
+
 def data_dir() -> Path:
     """Root of the plugin's user-level state.
 
@@ -142,7 +153,7 @@ def _append_event(tx, session_id: str, event_props: dict) -> None:
         """
         MERGE (s:Session {session_id: $session_id})
         ON CREATE SET s.created_at = datetime($timestamp)
-        SET s.user_id = $user_id
+        SET s.user_id = $user_id, s.harness = $harness
         WITH s
         OPTIONAL MATCH (dup:SessionEvent {event_id: $event_id})
         WITH s, dup
@@ -164,6 +175,7 @@ def _append_event(tx, session_id: str, event_props: dict) -> None:
         """,
         session_id=session_id,
         user_id=event_props.get("user_id"),
+        harness=harness(),
         timestamp=event_props.get("timestamp"),
         event_id=event_props.get("event_id"),
         event_props=event_props,

@@ -26,6 +26,9 @@ Storage decisions:
   address, resolved from the harness's logged-in account, then the
   machine's git configuration), so sessions have owners and later
   user-scoped memory has a stable key.
+- Every :Session is also stamped with the ``harness`` it came from
+  (``claude-code`` here; UAM_HARNESS overrides for ports), so a store
+  collecting sessions from several harnesses keeps their origins apart.
 
 Graph properties are flat, so ``tool_input`` is serialized to a JSON
 string before storage. Connection details come from the NEO4J_* settings
