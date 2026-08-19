@@ -303,6 +303,39 @@ def set_event_props(event_id: str, props: dict) -> None:
             session.execute_write(_set_props)
 
 
+def link_event_to_prompt(event_id: str, prompt_name: str, version: int | None) -> None:
+    """Link a SessionStart event to the SystemPrompt node it injected.
+
+    The prompt node only ever holds its current content, so the
+    relationship pins the version that was actually injected: re-seed
+    the prompt tomorrow and the link still says which version shaped
+    this session.
+    """
+    from neo4j import GraphDatabase
+
+    uri, user, password, database = neo4j_config()
+    with GraphDatabase.driver(
+        uri,
+        auth=(user, password),
+        connection_timeout=2.0,
+        max_transaction_retry_time=5.0,
+    ) as driver:
+        with driver.session(database=database) as session:
+
+            def _link(tx):
+                tx.run(
+                    "MATCH (e:SessionEvent {event_id: $event_id}) "
+                    "MATCH (p:SystemPrompt {name: $name}) "
+                    "MERGE (e)-[r:INJECTED_PROMPT]->(p) "
+                    "SET r.version = $version",
+                    event_id=event_id,
+                    name=prompt_name,
+                    version=version,
+                ).consume()
+
+            session.execute_write(_link)
+
+
 # The only keys ever copied out of the env file. Whatever else the file
 # contains stays in the file; a stray or typo'd key can never reach the
 # process environment.

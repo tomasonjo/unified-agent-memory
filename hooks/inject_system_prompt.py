@@ -8,9 +8,18 @@
 Resolution order:
 
 1. Neo4j ``(:SystemPrompt {name})`` node, when a graph is reachable. The
-   active name comes from ``UAM_AGENT_NAME`` (default ``default``).
-2. The bundled ``hooks/default_system_prompt.md`` file.
+   active name comes from ``UAM_AGENT_NAME`` (default ``default``). When
+   the node does not exist yet, the hook creates it from the bundled
+   default (v1) rather than falling back, so the graph is authoritative
+   from the first session and the SessionStart event always has a node
+   to link to. Creation only: an existing node is never modified here.
+2. The bundled ``hooks/default_system_prompt.md`` file, when the graph
+   is unreachable.
 3. A minimal embedded constant, so the hook always has something to inject.
+
+When the prompt came from the graph, the SessionStart event is linked to
+the node, ``(event)-[:INJECTED_PROMPT {version}]->(prompt)``, with the
+injected version pinned on the relationship.
 
 The Neo4j lookup uses a short connection timeout so an unreachable database
 delays session start by a moment instead of stalling it. The hook never
@@ -24,6 +33,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 HOOK_DIR = Path(__file__).resolve().parent
@@ -33,6 +43,7 @@ if str(HOOK_DIR) not in sys.path:
 from common import (  # noqa: E402
     append_session_event,
     in_llm_subprocess,
+    link_event_to_prompt,
     load_env,
     neo4j_config,
     set_event_props,
@@ -47,6 +58,20 @@ MINIMAL_FALLBACK_PROMPT = (
     "goal, and record durable facts and corrections so future sessions can "
     "reuse them."
 )
+
+
+# Creation only: ON CREATE seeds the bundled default as v1, and there is
+# no SET outside it, so a node that already exists comes back untouched.
+# Content changes stay with the seed-prompt skill, behind an explicit
+# request.
+BOOTSTRAP_QUERY = """\
+MERGE (p:SystemPrompt {name: $name})
+ON CREATE SET p.content = $content,
+    p.version = 1,
+    p.created_at = datetime($now),
+    p.updated_at = datetime($now)
+RETURN p.content AS content, p.version AS version
+"""
 
 
 def fetch_prompt_from_neo4j(name: str) -> tuple[str, int | None] | None:
@@ -66,6 +91,26 @@ def fetch_prompt_from_neo4j(name: str) -> tuple[str, int | None] | None:
                 name=name,
                 database_=database,
             )
+            if not records:
+                seed = read_bundled_prompt() or MINIMAL_FALLBACK_PROMPT
+                driver.execute_query(
+                    "CREATE CONSTRAINT IF NOT EXISTS FOR (p:SystemPrompt) "
+                    "REQUIRE p.name IS UNIQUE",
+                    database_=database,
+                )
+                records, _, _ = driver.execute_query(
+                    BOOTSTRAP_QUERY,
+                    name=name,
+                    content=seed,
+                    now=datetime.now(timezone.utc).isoformat(),
+                    database_=database,
+                )
+                print(
+                    f"[inject_system_prompt] seeded (:SystemPrompt "
+                    f"{{name: {name!r}}}) v1 from bundled default "
+                    f"({len(seed)} chars)",
+                    file=sys.stderr,
+                )
         if records and records[0].get("content"):
             content = str(records[0]["content"])
             if content.strip():
@@ -151,6 +196,11 @@ def main() -> int:
                     "prompt_content": prompt,
                 },
             )
+            # When the prompt came from the graph there is a node to
+            # point at, so the event is also linked to it, with the
+            # injected version pinned on the relationship.
+            if source == "neo4j":
+                link_event_to_prompt(event_id, name, version)
         except Exception as exc:
             print(f"[inject_system_prompt] record failed: {exc}", file=sys.stderr)
     except Exception as exc:  # hook must never crash the session
