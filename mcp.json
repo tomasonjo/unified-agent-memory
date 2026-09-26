@@ -1,12 +1,12 @@
 {
   "mcpServers": {
-    "neo4j": {
+    "memory": {
       "type": "stdio",
       "command": "uv",
       "args": [
         "run",
         "--script",
-        "${CLAUDE_PLUGIN_ROOT}/mcp/run_neo4j_mcp.py"
+        "${CLAUDE_PLUGIN_ROOT}/mcp/server.py"
       ]
     }
   }

@@ -21,13 +21,17 @@ slice into each phase, and record what was learned at the end.
 node, on explicit request only, checking what the graph already holds
 and confirming with you before it writes.
 
-And it mounts the graph back into the session as tools: `mcp.json`
-runs the [official Neo4j MCP server](https://github.com/neo4j/mcp) in
-read-only mode, so the model can pull from the same graph the hooks
-push into — introspect the schema and run read Cypher — while the
-write path stays with the hooks and the seed skill.
+And it mounts memory back into the session as tools: `mcp.json` runs
+the plugin's own `memory` MCP server. It offers episodic `search` and
+`expand` over the records extraction writes. Through a read-only proxy of
+the [official Neo4j MCP server](https://github.com/neo4j/mcp), it also
+offers schema introspection and read Cypher over the same graph the hooks
+push into. The write path stays with the hooks and the seed skill.
 
-This repo is the companion to the plugin chapter of the book. The full,
+This repo is the companion to the plugin chapter of the book, and is
+growing into the episodic-memory chapter:
+[docs/episodic-memory.md](docs/episodic-memory.md) holds that design,
+and the memory server is its first piece. The full,
 self-learning system it grows into (typed memory, extraction, consolidation,
 recall) lives in the sister project,
 [meta-knowledge-graph](https://github.com/neo4j-labs/meta-knowledge-graph).
@@ -45,6 +49,7 @@ hooks/
   inject_system_prompt.py  # recall: system prompt -> session context
   default_system_prompt.md # the bundled default prompt (injection's fallback)
   llm.py               # background-agent LLM: headless claude (default) or LiteLLM
+  episodes.py          # episodic reads: search, expand, rows (memory server, recall hooks)
 skills/
   orchestrate/
     SKILL.md             # on-demand skill: subagent orchestration
@@ -52,8 +57,10 @@ skills/
     SKILL.md             # on-demand skill: check the graph, confirm, publish the prompt
     scripts/seed_system_prompt.py  # status + versioned write of the prompt node
 mcp/
-  run_neo4j_mcp.py       # launcher: canonical env -> official Neo4j MCP server, read-only
-mcp.json                 # mounts the server above under the name "neo4j"
+  server.py              # the "memory" server: search, expand, read-only graph tools
+mcp.json                 # mounts the server above under the name "memory"
+docs/
+  episodic-memory.md     # episodic memory design (chapter 3)
 ```
 
 `mcp.json` carries the file name the
@@ -82,8 +89,9 @@ PEP 723 scripts; uv builds a tiny cached environment with the Neo4j driver
 on first run) and a reachable Neo4j for event capture. Without Neo4j the
 plugin still runs: the bundled default prompt is injected, and capture
 reports to stderr and drops the event instead of blocking the session.
-The read-only MCP mount additionally needs APOC (`meta` component)
-installed in the database; without it the mount alone is lost.
+The memory server's graph tools additionally need APOC (`meta`
+component) installed in the database. Without it only those tools are
+lost; `search` and `expand` keep working.
 
 ## What each hook does
 
@@ -186,33 +194,62 @@ The skill format and the pairing of memory hooks with skills follow
 [claude-mem](https://github.com/thedotmack/claude-mem), whose `do` and
 `mem-search` skills are worth reading.
 
-## The graph as tools (read-only MCP mount)
+## The memory server (MCP)
 
 The hooks are a push channel: the record flows out because events fire.
-`mcp.json` adds the pull channel back in: it mounts the
-[official Neo4j MCP server](https://github.com/neo4j/mcp) under the
-name `neo4j`, so the model can query the same graph the hooks write to
-— ask "what did I do in my last session?" and the agent introspects the
-schema, then walks the session chain with the timeline query above.
-Those tool calls are lifecycle events like any other, so recall itself
-lands in the record.
+`mcp.json` adds the pull channel back in with one server, `memory`
+([mcp/server.py](mcp/server.py)). It is a uv script like the hooks and
+loads the same canonical env file (exported variables win, whitelist
+only). It announces four tools:
 
-The mount is read-only by construction. `mcp.json` does not launch the
-server directly; it runs `mcp/run_neo4j_mcp.py`, a uv script that loads
-the same canonical env file the hooks read (exported variables win,
-whitelist only), resolves the same connection defaults, pins
-`NEO4J_READ_ONLY=true`, and execs the server. With that flag the server
-never announces its `write-cypher` tool at all — enforcement at the
-server, stronger than a harness-side permission — leaving `get-schema`
-and `read-cypher` (plus a GDS procedure listing when the database has
-GDS installed). The model reads; writing belongs to the hooks and the
-seed-prompt skill.
+- **`search(query?, project?, kind?, since?, limit?)`** returns one-line
+  rows for episodic records, best match first, or the newest when there
+  is no query. A record is either an observation (one finding, fix, or
+  decision) or a session summary (where a session's work stands). A row
+  reads like
+  `#o112 · discovery · yesterday · Renewal drop traced to March pipeline change`.
+- **`expand(id, events?, cursor?)`** opens one row. An observation comes
+  with its facts, narrative, timeline neighbors, and source session. A
+  session comes with its current summary and its observations.
+  `events=true` pages the captured events behind a record; for an
+  observation, that is exactly the events its extraction run processed.
+- **`get-schema` and `read-cypher`** come from the
+  [official Neo4j MCP server](https://github.com/neo4j/mcp). It runs as a
+  subprocess behind a FastMCP proxy and is mounted without a prefix, so
+  its tools appear as the memory server's own. Ask "what did I do in my
+  last session?" and the agent can introspect the schema, then walk the
+  session chain with the timeline query above.
 
-The server needs the APOC plugin (its `meta` component) available in
-the database for schema introspection; Aura and APOC-enabled local
-installs qualify. Without it the server exits at startup and the mount
-costs only its own feature: the session runs, capture and injection are
-unaffected, and the tools are simply absent.
+Extraction writes the episodic records. It is designed in
+[docs/episodic-memory.md](docs/episodic-memory.md) but not built yet, so
+for now `search` finds nothing and `expand` opens captured sessions and
+their events by session id.
+
+`search` scopes to the current project. The project is the directory
+name of the repository's main checkout, so worktrees count as the same
+project, or `UAM_PROJECT_ID` when that is set. The `project` argument is a
+filter, not an authorization check: anyone who can reach the database can
+read all of it through these tools. `search` matches stored text through
+a fulltext index it creates on first use. Setting `UAM_EMBEDDING_MODEL`
+adds similarity search, whose matches are merged with the text matches
+by reciprocal rank fusion.
+
+The server is read-only by construction. It pins
+`NEO4J_MCP_READ_ONLY=true` for the Neo4j server, which then never
+announces its `write-cypher` tool at all. That is enforcement at the
+server, stronger than a harness-side permission, and the episodic tools
+only read. Writing belongs to the hooks and the seed-prompt skill. The
+Neo4j server sees only the settings passed to it. Its anonymous usage
+telemetry is on by default; export `NEO4J_MCP_TELEMETRY=false` to turn it
+off.
+
+The Neo4j server needs the APOC plugin (its `meta` component) in the
+database for schema introspection; Aura and APOC-enabled local installs
+qualify. Without APOC that server exits at startup and FastMCP skips the
+mount. Only `get-schema` and `read-cypher` are lost: `search` and `expand`
+keep working, and the session, capture, and injection are unaffected.
+Tool calls are lifecycle events like any other, so recall itself lands in
+the record.
 
 ## Configuration
 
@@ -279,6 +316,26 @@ credential store when no key is set, and the call degrades to headless
 by a hook carries the `UAM_IN_LLM_SUBPROCESS` sentinel, so the plugin's
 own hooks no-op inside it instead of capturing it or recursing.
 
+### Episodic memory
+
+The memory server needs no setup. Three optional settings change its
+defaults:
+
+```
+UAM_PROJECT_ID=renewal-analysis     # pin the project key
+UAM_EMBEDDING_MODEL=openai/text-embedding-3-small
+UAM_EMBEDDING_DIMENSIONS=1536       # must match the model
+```
+
+The project key defaults to the directory name of the repository's main
+checkout. Pin it when checkouts of one project have different names, or
+when unrelated repositories share one. A value in the env file pins every
+repository on the machine, so export it per repository instead; for
+Claude Code, use the `env` block of the repository's
+`.claude/settings.json`. An embedding model is a LiteLLM model string,
+paid for by its provider's key. The `claude-cli` backend has no
+embeddings, and without a model, search runs on stored text alone.
+
 Resolution rules:
 
 - Exported environment variables win over file values.
@@ -313,8 +370,9 @@ Resolution rules:
 - **The prompt is data.** Moving the system prompt into the graph turns
   "edit a config file on every machine" into "update one node that every
   session, on any harness wired to the same store, reads at startup".
-- **Reads for the model, writes for the hooks.** The MCP mount gives the
-  model schema introspection and read Cypher only, pinned read-only in
-  the launcher so the server never even announces a write tool. Every
+- **Reads for the model, writes for the hooks.** The memory server gives
+  the model episodic search and expand plus schema introspection and read
+  Cypher. The Neo4j server inside it is pinned read-only, so it never
+  even announces a write tool. Every
   write into the graph goes through code — capture, injection's record,
   the seed skill — never through the model's judgment.

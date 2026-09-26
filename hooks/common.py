@@ -83,6 +83,56 @@ def user_id() -> str:
     return _claude_account_email() or _git_email() or "unknown"
 
 
+def _git_main_root(directory: Path) -> Path | None:
+    """Root of the main checkout that ``directory`` belongs to, if any.
+
+    Asks git for the common directory rather than the top level, so a
+    linked worktree (Claude Code creates them under .claude/worktrees)
+    resolves to the checkout it was made from, not to a directory named
+    after the worktree.
+    """
+    try:
+        out = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(directory),
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except Exception:
+        return None
+    common = out.stdout.strip()
+    if out.returncode != 0 or not common:
+        return None
+    path = Path(common)
+    return path.parent if path.name == ".git" else path
+
+
+def project_id(cwd: str | None = None) -> str:
+    """Resolve the project key episodic memory is organized by.
+
+    ``UAM_PROJECT_ID`` wins when set. Exported per repository, it pins one
+    id for every checkout of a project whatever its directory is called;
+    set in the user-level env file it would pin every repository on the
+    machine. Otherwise the key is the directory name of the main checkout,
+    or of the working directory outside git. Directory names are only a
+    convenient default: two unrelated repositories can share one, which is
+    what the override is for.
+    """
+    override = (os.getenv("UAM_PROJECT_ID") or "").strip()
+    if override:
+        return override
+    directory = Path(cwd or os.getenv("CLAUDE_PROJECT_DIR") or os.getcwd())
+    root = _git_main_root(directory) or directory
+    return root.name or "unknown"
+
+
 def harness() -> str:
     """Name of the harness this capture is wired into.
 
@@ -345,9 +395,12 @@ ENV_KEYS = (
     "NEO4J_PASSWORD",
     "NEO4J_DATABASE",
     "UAM_AGENT_NAME",
+    "UAM_PROJECT_ID",
     "UAM_LLM_BACKEND",
     "UAM_LLM_MODEL",
     "UAM_CLAUDE_CLI_MODEL",
+    "UAM_EMBEDDING_MODEL",
+    "UAM_EMBEDDING_DIMENSIONS",
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
     "GEMINI_API_KEY",
@@ -380,6 +433,16 @@ ENV_TEMPLATE = """\
 # OPENAI_API_KEY=
 # ANTHROPIC_API_KEY=
 # GEMINI_API_KEY=
+
+# Episodic memory. The project key defaults to the repository's
+# directory name; UAM_PROJECT_ID pins it, but set here it pins every
+# repository on this machine, so prefer exporting it per repository.
+# An embedding model (a LiteLLM model string, paid for by its provider
+# key) adds similarity search to the memory tools; without one they
+# search stored text only. The dimensions must match the model.
+# UAM_PROJECT_ID=
+# UAM_EMBEDDING_MODEL=openai/text-embedding-3-small
+# UAM_EMBEDDING_DIMENSIONS=1536
 """
 
 

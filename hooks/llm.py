@@ -33,6 +33,12 @@ One entry point, :func:`llm_complete`, behind one backend knob
   to ``ANTHROPIC_API_KEY``, and degrading to headless ``claude -p``
   when neither is usable.
 
+Retrieval embeddings are separate from completions: :func:`embed_texts`
+calls the LiteLLM model named by ``UAM_EMBEDDING_MODEL``, whatever the
+backend, because headless Claude Code has no embeddings endpoint. With no
+model set, :func:`embeddings_ready` is false and retrieval stays on
+fulltext search.
+
 The module mirrors the sister meta-knowledge-graph project's design and
 imports with the standard library alone; litellm is imported lazily
 inside the backend that needs it. Runnable directly for a smoke test:
@@ -65,6 +71,8 @@ DEFAULT_LLM_MODEL = "anthropic/claude-haiku-4-5"
 DEFAULT_CLAUDE_CLI_MODEL = "haiku"
 DEFAULT_CLAUDE_CLI_TIMEOUT = 300.0
 DEFAULT_NUM_RETRIES = 2
+DEFAULT_EMBEDDING_DIMENSIONS = 1536
+EMBEDDING_TIMEOUT_SECONDS = 10.0
 
 CLAUDE_CODE_CREDENTIAL_SERVICE = "Claude Code-credentials"
 OAUTH_TOKEN_PREFIX = "sk-ant-oat"
@@ -90,6 +98,45 @@ def num_retries() -> int:
         return max(0, int(os.getenv("UAM_LLM_NUM_RETRIES", DEFAULT_NUM_RETRIES)))
     except ValueError:
         return DEFAULT_NUM_RETRIES
+
+
+def embedding_model() -> str:
+    """LiteLLM embedding model string from ``UAM_EMBEDDING_MODEL``; empty when unset."""
+    return (os.getenv("UAM_EMBEDDING_MODEL") or "").strip()
+
+
+def embeddings_ready() -> bool:
+    """True when an embedding model is configured.
+
+    Embeddings are optional: without a model, retrieval runs on fulltext
+    alone and the memory tools keep the same row contract. The claude-cli
+    backend has no embeddings endpoint, so a model here always goes
+    through LiteLLM and its provider key.
+    """
+    return bool(embedding_model())
+
+
+def embedding_dimensions() -> int:
+    """Vector size the indexes are created with; must match the model."""
+    try:
+        return int(os.getenv("UAM_EMBEDDING_DIMENSIONS") or DEFAULT_EMBEDDING_DIMENSIONS)
+    except ValueError:
+        return DEFAULT_EMBEDDING_DIMENSIONS
+
+
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    """Embed ``texts`` with the configured model, one vector per text."""
+    os.environ.setdefault("LITELLM_MODE", "PRODUCTION")
+    import litellm
+
+    response = litellm.embedding(
+        model=embedding_model(), input=texts, timeout=EMBEDDING_TIMEOUT_SECONDS
+    )
+    vectors = []
+    for item in response.data:
+        vector = item["embedding"] if isinstance(item, dict) else item.embedding
+        vectors.append([float(value) for value in vector])
+    return vectors
 
 
 def llm_complete(messages: list[dict[str, str]], *, model: str | None = None) -> str:
