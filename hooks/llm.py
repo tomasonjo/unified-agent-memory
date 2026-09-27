@@ -139,21 +139,38 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     return vectors
 
 
-def llm_complete(messages: list[dict[str, str]], *, model: str | None = None) -> str:
+def completion_model() -> str:
+    """The model background completions run on, as recorded beside their output."""
+    if llm_backend() == "claude-cli":
+        cli_model = (os.getenv("UAM_CLAUDE_CLI_MODEL") or DEFAULT_CLAUDE_CLI_MODEL).strip()
+        return f"claude-cli/{cli_model}"
+    return llm_model()
+
+
+def llm_complete(
+    messages: list[dict[str, str]],
+    *,
+    model: str | None = None,
+    max_tokens: int | None = None,
+) -> str:
     """Single entry point for hook LLM calls.
 
     Takes chat-style messages, dispatches to the configured backend, and
     returns the response text; callers keep their own post-processing.
+    ``max_tokens`` is the output allowance on the litellm backend; headless
+    Claude Code uses the model's own limit.
     """
     if llm_backend() == "claude-cli":
         return _complete_claude_cli(messages)
-    return _complete_litellm(messages, model)
+    return _complete_litellm(messages, model, max_tokens)
 
 
 # --- litellm backend ---------------------------------------------------------
 
 
-def _complete_litellm(messages: list[dict[str, str]], model: str | None) -> str:
+def _complete_litellm(
+    messages: list[dict[str, str]], model: str | None, max_tokens: int | None = None
+) -> str:
     model_name = model or llm_model()
     api_key = _anthropic_subscription_token(model_name)
 
@@ -189,6 +206,8 @@ def _complete_litellm(messages: list[dict[str, str]], model: str | None) -> str:
     }
     if api_key:
         kwargs["api_key"] = api_key
+    if max_tokens:
+        kwargs["max_tokens"] = max_tokens
     response = litellm.completion(**kwargs)
     return response.choices[0].message.content or ""
 
@@ -351,6 +370,19 @@ def _claude_cli_env() -> dict[str, str]:
     return env
 
 
+# A completion needs no tools, no MCP servers, and no saved session: without
+# these, every background call would start the machine's MCP servers (this
+# plugin's own among them), could wander off reading files, and would leave
+# a resumable session behind. Older CLIs that lack a flag get a second try
+# without them.
+CLAUDE_CLI_COMPLETION_FLAGS = [
+    "--tools",
+    "",
+    "--strict-mcp-config",
+    "--no-session-persistence",
+]
+
+
 def _complete_claude_cli_once(messages: list[dict[str, str]]) -> str:
     """One completion through the harness's headless agent.
 
@@ -382,15 +414,21 @@ def _complete_claude_cli_once(messages: list[dict[str, str]]) -> str:
     timeout = float(
         os.getenv("UAM_CLAUDE_CLI_TIMEOUT") or DEFAULT_CLAUDE_CLI_TIMEOUT
     )
-    proc = subprocess.run(
-        cmd,
-        input=user,
-        capture_output=True,
-        text=True,
-        env=_claude_cli_env(),
-        cwd=tempfile.gettempdir(),
-        timeout=timeout,
-    )
+
+    def run(args: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            args,
+            input=user,
+            capture_output=True,
+            text=True,
+            env=_claude_cli_env(),
+            cwd=tempfile.gettempdir(),
+            timeout=timeout,
+        )
+
+    proc = run(cmd + CLAUDE_CLI_COMPLETION_FLAGS)
+    if proc.returncode != 0 and "unknown option" in (proc.stderr or "").lower():
+        proc = run(cmd)
     if proc.returncode != 0:
         # Auth and API failures arrive as a JSON envelope on stdout with
         # an empty stderr, so mine the envelope for the actual reason.
@@ -402,6 +440,10 @@ def _complete_claude_cli_once(messages: list[dict[str, str]]) -> str:
                 detail = (proc.stdout or "").strip()
         raise RuntimeError(f"claude -p exited {proc.returncode}: {detail[:300]}")
     envelope = json.loads(proc.stdout)
+    # An error can also come back as a result, with a zero exit; its text
+    # is the error message, not a completion.
+    if envelope.get("is_error"):
+        raise RuntimeError(f"claude -p failed: {str(envelope.get('result'))[:300]}")
     return envelope.get("result") or ""
 
 

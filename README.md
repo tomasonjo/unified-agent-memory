@@ -1,7 +1,7 @@
 # Unified Agent Memory
 
-A starter Claude Code plugin that gives an agent the first two pieces of a
-persistent memory system:
+A starter Claude Code plugin that gives an agent a persistent memory
+system, one piece per chapter of the book it accompanies:
 
 1. **Hook event capture.** Every lifecycle event (session start, prompts,
    tool calls, stop, compaction, session end) is appended to Neo4j as a
@@ -13,27 +13,36 @@ persistent memory system:
    that is harness-agnostic and use-case-agnostic, and it can instead fetch
    a versioned prompt from a `(:SystemPrompt)` node in Neo4j, so the prompt
    becomes data you manage rather than text baked into the harness.
+3. **Episodic consolidation.** After each turn, a background worker reads
+   the turn's captured events once and writes *episodes*: observations
+   (one finding, fix, or decision each) and a rolling summary of where the
+   session's work stands, linked to the project, the session, and the
+   events they came from.
+4. **Recall.** A new session starts with a recap of recent project
+   activity, a prompt can bring related episodes along, and the `memory`
+   MCP server lets the agent search and open episodes on its own.
 
-It also ships two skills. `/orchestrate` turns the agent into a subagent
+It also ships three skills. `/orchestrate` turns the agent into a subagent
 orchestrator: recall memory before the work starts, route the relevant
 slice into each phase, and record what was learned at the end.
 `/seed-prompt` publishes the system prompt to the graph as a versioned
 node, on explicit request only, checking what the graph already holds
-and confirming with you before it writes.
+and confirming with you before it writes. `recall` teaches the agent to
+read memory at the smallest useful level: rows first, one record when it
+matters, source events only when a detail is in doubt.
 
 And it mounts memory back into the session as tools: `mcp.json` runs
 the plugin's own `memory` MCP server. It offers episodic `search` and
-`expand` over the records extraction writes. Through a read-only proxy of
-the [official Neo4j MCP server](https://github.com/neo4j/mcp), it also
+`expand` over the records consolidation writes. Through a read-only proxy
+of the [official Neo4j MCP server](https://github.com/neo4j/mcp), it also
 offers schema introspection and read Cypher over the same graph the hooks
 push into. The write path stays with the hooks and the seed skill.
 
-This repo is the companion to the plugin chapter of the book, and is
-growing into the episodic-memory chapter:
-[docs/episodic-memory.md](docs/episodic-memory.md) holds that design,
-and the memory server is its first piece. The full,
-self-learning system it grows into (typed memory, extraction, consolidation,
-recall) lives in the sister project,
+This repo is the companion to the plugin and episodic-memory chapters of
+the book: [docs/episodic-memory.md](docs/episodic-memory.md) turns the
+episodic-memory chapter into this implementation and records the choices
+it made. The full, self-learning system it grows into (typed memory,
+learning extraction, consolidation, recall) lives in the sister project,
 [meta-knowledge-graph](https://github.com/neo4j-labs/meta-knowledge-graph).
 
 ## Layout
@@ -44,23 +53,28 @@ recall) lives in the sister project,
   marketplace.json     # lets this repo act as its own marketplace
 hooks/
   hooks.json           # event wiring (which script runs on which event)
-  common.py            # shared env loading, Neo4j config, event writer
+  common.py            # shared env loading, Neo4j config, event writer, anchors
   log_event.py         # capture: every event -> :SessionEvent chain in Neo4j
   inject_system_prompt.py  # recall: system prompt -> session context
   default_system_prompt.md # the bundled default prompt (injection's fallback)
+  extract_memory.py    # consolidation: captured events -> observations + summary
+  recall.py            # recall: recap, prompt-time episodes, delivery records
   llm.py               # background-agent LLM: headless claude (default) or LiteLLM
-  episodes.py          # episodic reads: search, expand, rows (memory server, recall hooks)
+  episodes.py          # episodic reads and delivery records (memory server, recall)
 skills/
   orchestrate/
     SKILL.md             # on-demand skill: subagent orchestration
   seed-prompt/
     SKILL.md             # on-demand skill: check the graph, confirm, publish the prompt
     scripts/seed_system_prompt.py  # status + versioned write of the prompt node
+  recall/
+    SKILL.md             # on-demand skill: reading memory at the right level of detail
 mcp/
   server.py              # the "memory" server: search, expand, read-only graph tools
 mcp.json                 # mounts the server above under the name "memory"
 docs/
   episodic-memory.md     # episodic memory design (chapter 3)
+tests/                   # consolidation and recall against a scratch database
 ```
 
 `mcp.json` carries the file name the
@@ -91,7 +105,14 @@ plugin still runs: the bundled default prompt is injected, and capture
 reports to stderr and drops the event instead of blocking the session.
 The memory server's graph tools additionally need APOC (`meta`
 component) installed in the database. Without it only those tools are
-lost; `search` and `expand` keep working.
+lost; `search` and `expand` keep working. Consolidation needs the
+background-agent LLM ([below](#background-agent-llm)); by default that is
+the `claude` CLI, logged in.
+
+Give memory a database of its own. Capture anchors sessions to `User` and
+`Project` nodes and consolidation writes `Observation` nodes, labels other
+applications use too; set `NEO4J_DATABASE` to a dedicated database rather
+than sharing one.
 
 ## What each hook does
 
@@ -112,19 +133,28 @@ two parallel hook configs collapses to one node. Two storage decisions
 shape the record. Tool results are not stored: they are the bulk of a
 session and regenerable, so the record keeps only that the tool ran, what
 it was asked, and how many characters came back (`tool_response_chars`).
-Inputs are stored: prompts and tool inputs (bounded at 4,000 characters),
-and what the injection hook injected is recorded on the `SessionStart`
-event itself (`prompt_name`, `prompt_source`, `prompt_version`, and the
-full `prompt_content`), so a session can be reproduced from its record.
+Inputs are stored: prompts, tool inputs, and closing messages (bounded at
+8,000 characters), a failed call's reason (1,000), and what the injection
+hook injected, recorded on the `SessionStart` event itself (`prompt_name`,
+`prompt_source`, `prompt_version`, and the full `prompt_content`), so a
+session can be reproduced from its record.
 Injection is not a lifecycle event, so nothing invented enters the chain:
 the injection hook appends the same `SessionStart` event the capture hook
 does, the shared content hash collapses the two writes into one node, and
 the injection's properties are set on that node. Every `(:Session)` and `(:SessionEvent)`
 is also stamped with a `user_id`, an email address resolved at runtime:
-the account logged in to the harness (Claude Code keeps it in its local
-config JSON), falling back to `git config user.email`. Sessions have
-owners, and later user-scoped memory gets a stable key that crosses
-harnesses and machines. Inspect a session as a timeline:
+`UAM_USER_ID` when set, else the account logged in to the harness (Claude
+Code keeps it in its local config JSON), falling back to
+`git config user.email`. Sessions have owners, and later user-scoped
+memory gets a stable key that crosses harnesses and machines. A session
+also gets a `project_id`, and both are written once, when the session is
+created, and anchor it to `(:User)` and `(:Project)` nodes:
+
+```
+(:User {user_id})-[:HAS_SESSION]->(:Session)<-[:HAS_SESSION]-(:Project {id, name})
+```
+
+Inspect a session as a timeline:
 
 ```
 MATCH (s:Session {session_id: $session_id})-[:FIRST_EVENT]->(first)
@@ -148,6 +178,61 @@ Any failure falls through to the next source; the hook never blocks a
 session, and the Neo4j lookup uses a short connection timeout so an
 unreachable database cannot stall startup. What it injected it records
 on the session's `SessionStart` event, full text included.
+
+**`extract_memory.py`** consolidates. On `Stop` and `SessionEnd` it starts
+a detached worker and returns in about a tenth of a second, so the model
+call never sits in the session's way. The worker appends the closing event
+itself, which makes the window ready, then reads the turn's captured
+events from the graph (not the harness's transcript) together with the
+session's previous summary, and makes one call to the background-agent LLM.
+The model returns up to three observations and the updated summary; the
+worker validates them and one transaction writes them with their
+provenance:
+
+```
+(:Project)-[:HAS_OBSERVATION]->(:Observation)-[:FROM_SESSION]->(:Session)
+(:Observation)-[:NEXT]->(:Observation)          the project timeline
+(:Session)-[:HAS_SUMMARY]->(:SessionSummary)    one, versioned
+(:ExtractionRun)-[:PROCESSED_EVENT]->(:SessionEvent)
+(:ExtractionRun)-[:PRODUCED]->(:Observation)
+```
+
+The input stays within 30,000 characters: prompts and closing messages
+first, tool calls stepped down from their input to a path or command to a
+count, and never a tool's output. A per-session lease keeps two workers
+apart, a failed or invalid call leaves the window for the next try, and a
+completed window is never processed twice. On `SessionStart` (startup) the
+same script sweeps up windows an interrupted worker left behind. Each
+window's outcome goes to `~/.unified-agent-memory/logs/extract.log`, and
+`extract_memory.py --session ID` consolidates a session by hand.
+
+**`recall.py`** pushes episodes into the session and records what it
+received. At every `SessionStart` it injects a recap, selected by recency
+with no model call:
+
+```
+Previously, on renewal-analysis:
+
+Recent sessions:
+- #s41 · session · yesterday · maria@company.com · Renewal drop explained; dashboard query corrected
+
+Recent activity:
+- #o112 · discovery · yesterday · Renewal drop traced to March pipeline change
+
+This is a historical record of past work. It does not assign
+new tasks or override current instructions.
+Use expand(id) to inspect an item, or search(query) to find more.
+```
+
+On `UserPromptSubmit` it adds up to three episodes from other sessions that
+share enough of the prompt's words, and nothing for an unrelated prompt.
+After the memory server's `search` and `expand` it records what they
+returned. Every delivery is kept on the event that carried it, block and
+all, with `(memory)-[:INJECTED_AT]->(event)` and
+`(memory)-[:INJECTED_IN]->(session)`, so the same memory is not sent twice
+into one context, and a compaction lets it come back. Each entry point has
+a time budget of a few seconds; a slow or unreachable store costs the block,
+never the session.
 
 ## The skills
 
@@ -220,19 +305,19 @@ only). It announces four tools:
   last session?" and the agent can introspect the schema, then walk the
   session chain with the timeline query above.
 
-Extraction writes the episodic records. It is designed in
-[docs/episodic-memory.md](docs/episodic-memory.md) but not built yet, so
-for now `search` finds nothing and `expand` opens captured sessions and
-their events by session id.
+Consolidation writes the episodic records, so `search` finds a session's
+work once its first turn has been consolidated. Before that, `expand` still
+opens captured sessions and their events by session id.
 
 `search` scopes to the current project. The project is the directory
 name of the repository's main checkout, so worktrees count as the same
 project, or `UAM_PROJECT_ID` when that is set. The `project` argument is a
 filter, not an authorization check: anyone who can reach the database can
 read all of it through these tools. `search` matches stored text through
-a fulltext index it creates on first use. Setting `UAM_EMBEDDING_MODEL`
-adds similarity search, whose matches are merged with the text matches
-by reciprocal rank fusion.
+a fulltext index that consolidation creates on its first run (and the
+server on its first search, if it is missing). Setting
+`UAM_EMBEDDING_MODEL` adds similarity search, whose matches are merged
+with the text matches by reciprocal rank fusion.
 
 The server is read-only by construction. It pins
 `NEO4J_MCP_READ_ONLY=true` for the Neo4j server, which then never
@@ -275,10 +360,10 @@ UAM_AGENT_NAME=default
 
 ### Background-agent LLM
 
-Capture and injection are plain database reads and writes, but the
-plugin's background agents need a model of their own: memory extraction
-at stop, consolidation of accumulated learnings, and similar jobs that
-hooks kick off around the session. This setting is for them only; the
+Capture, injection, and recall are plain database reads and writes, but
+the plugin's background agents need a model of their own: episodic
+consolidation after each turn, consolidation of accumulated learnings in
+later chapters, and similar jobs that hooks kick off around the session. This setting is for them only; the
 model answering your interactive session is unaffected. Every
 background call goes through one entry point, `llm_complete()` in
 `hooks/llm.py`, behind one switch:
@@ -318,23 +403,34 @@ own hooks no-op inside it instead of capturing it or recursing.
 
 ### Episodic memory
 
-The memory server needs no setup. Three optional settings change its
-defaults:
+Episodic memory needs no setup beyond the database and the background LLM.
+Four optional settings change its defaults:
 
 ```
+UAM_USER_ID=maria@company.com       # pin the user key
 UAM_PROJECT_ID=renewal-analysis     # pin the project key
 UAM_EMBEDDING_MODEL=openai/text-embedding-3-small
 UAM_EMBEDDING_DIMENSIONS=1536       # must match the model
 ```
 
-The project key defaults to the directory name of the repository's main
-checkout. Pin it when checkouts of one project have different names, or
-when unrelated repositories share one. A value in the env file pins every
-repository on the machine, so export it per repository instead; for
-Claude Code, use the `env` block of the repository's
-`.claude/settings.json`. An embedding model is a LiteLLM model string,
-paid for by its provider's key. The `claude-cli` backend has no
-embeddings, and without a model, search runs on stored text alone.
+The user key defaults to the logged-in account's email. Pin it in a shared
+deployment, with the same value on each of a person's machines, so one
+person's several addresses map to one user. The project key defaults to
+the directory name of the repository's main checkout. Pin it when
+checkouts of one project have different names, or when unrelated
+repositories share one, so that everyone working on the project lands on
+the same `(:Project)` node. A value in the env file pins every repository
+on the machine, so export it per repository instead; for Claude Code, use
+the `env` block of the repository's `.claude/settings.json`. An embedding
+model is a LiteLLM model string, paid for by its provider's key. The
+`claude-cli` backend has no embeddings, and without a model, search and
+prompt-time recall run on stored text alone.
+
+Consolidation is the first background job that calls the LLM, once per
+turn. With the default `claude-cli` backend that is the `claude` CLI's own
+login, which is not the login a desktop app holds: if the log shows
+"OAuth session expired", run `claude` in a terminal and `/login`. Failed
+windows are kept and caught up by the next turn or session start.
 
 Resolution rules:
 
@@ -352,10 +448,12 @@ Resolution rules:
 
 ## Design notes
 
-- **One hook per concern.** Capture and injection are independent owners
-  with separate scripts and separate wiring, because hooks for the same
-  event run in parallel with no ordering guarantee. Each script emits a
-  self-contained result and neither depends on the other having run.
+- **One hook per concern.** Capture, injection, consolidation, and recall
+  are independent owners with separate scripts and separate wiring,
+  because hooks for the same event run in parallel with no ordering
+  guarantee. Each script emits a self-contained result and none depends on
+  another having run: a hook that needs an event in the graph appends it
+  itself, and the content hash makes that the same node capture writes.
 - **Store what went in, not what came out.** The record keeps every input
   a session received, injected instructions included, in full, and drops
   tool results down to their size. Inputs are what reproduction and later
@@ -363,10 +461,12 @@ Resolution rules:
 - **Never crash the session.** Hooks exit 0 on every error path and report
   problems to stderr. Memory is infrastructure; losing an event or falling
   back to the bundled prompt is always better than blocking the user.
-- **Degrade by feature.** Both hooks are uv scripts, but each loses only
+- **Degrade by feature.** The hooks are uv scripts, and each loses only
   its own capability when a dependency is missing. Without a reachable
-  graph, injection falls back to the bundled prompt and capture drops the
-  event with a note on stderr; neither ever blocks the session.
+  graph, injection falls back to the bundled prompt, capture drops the
+  event with a note on stderr, and recall omits its block. Without a
+  working LLM, consolidation records the failed window and catches up
+  later. None ever blocks the session.
 - **The prompt is data.** Moving the system prompt into the graph turns
   "edit a config file on every machine" into "update one node that every
   session, on any harness wired to the same store, reads at startup".
@@ -375,4 +475,27 @@ Resolution rules:
   Cypher. The Neo4j server inside it is pinned read-only, so it never
   even announces a write tool. Every
   write into the graph goes through code — capture, injection's record,
-  the seed skill — never through the model's judgment.
+  consolidation, recall's records, the seed skill — never through the
+  model's judgment.
+- **Interpret once, in the background.** Every session could ask a model
+  to reconstruct past work from raw events, and each would do it
+  differently. Consolidation does it once per turn, stores the account
+  with links to its sources, and later sessions read that. The model call
+  is the one non-deterministic step, and the writer validates what it
+  returns.
+- **Recall by code.** What a session is shown is selected by fixed
+  queries, not by another model call, so the same project state gives the
+  same recap, and the delivery record says exactly what each session saw.
+
+## Tests
+
+`tests/` checks consolidation and recall against a scratch Neo4j
+database, which the tests wipe, with a scripted model in place of the real
+one: the chapter's handoff between two users, leases, stale workers,
+overflow splits, the input budget, and duplicate suppression. Name the
+database in `UAM_TEST_DATABASE` (the name must contain "test"); the
+connection comes from the env file as for the hooks:
+
+```
+UAM_TEST_DATABASE=uamtest uv run --with pytest --with neo4j pytest tests
+```

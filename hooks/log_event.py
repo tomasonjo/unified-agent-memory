@@ -23,9 +23,15 @@ Storage decisions:
   the injection hook records what it injected on the SessionStart event,
   so a session can be reproduced from its record.
 - Every :Session and :SessionEvent is stamped with a ``user_id`` (an email
-  address, resolved from the harness's logged-in account, then the
-  machine's git configuration), so sessions have owners and later
-  user-scoped memory has a stable key.
+  address, resolved from ``UAM_USER_ID``, then the harness's logged-in
+  account, then the machine's git configuration), so sessions have owners
+  and later user-scoped memory has a stable key. A session also gets a
+  ``project_id`` (the main checkout's directory name, or
+  ``UAM_PROJECT_ID``). Both are written once, when the session is created,
+  and anchor it: ``(:User)-[:HAS_SESSION]->(:Session)`` and
+  ``(:Project)-[:HAS_SESSION]->(:Session)``.
+- A failed tool call keeps its reason (``tool_error``, at most 1,000
+  characters): why it failed, not what it printed.
 - Every :Session is also stamped with the ``harness`` it came from
   (``claude-code`` here; UAM_HARNESS overrides for ports), so a store
   collecting sessions from several harnesses keeps their origins apart,
@@ -54,17 +60,20 @@ from common import append_session_event, in_llm_subprocess, load_env  # noqa: E4
 
 MAX_FIELD_CHARS = 8000
 TRUNCATED_FIELDS = ("tool_input", "prompt", "last_assistant_message")
+# A failed call's reason, which is not its result: enough to say why it
+# failed, never the output of a command that printed before failing.
+MAX_ERROR_CHARS = 1000
 
 
 def _text(value) -> str:
     return value if isinstance(value, str) else json.dumps(value, default=str)
 
 
-def _truncate(value) -> str:
+def _truncate(value, limit: int = MAX_FIELD_CHARS) -> str:
     text = _text(value)
-    if len(text) <= MAX_FIELD_CHARS:
+    if len(text) <= limit:
         return text
-    return text[:MAX_FIELD_CHARS] + f"...[truncated {len(text) - MAX_FIELD_CHARS} chars]"
+    return text[:limit] + f"...[truncated {len(text) - limit} chars]"
 
 
 def build_event_props(data: dict) -> dict:
@@ -72,13 +81,19 @@ def build_event_props(data: dict) -> dict:
     response = data.get("tool_response")
     props = {
         "cwd": data.get("cwd"),
+        # One id per user prompt, shared by every event of its turn. Part of
+        # the content hash, so a turn that repeats an earlier one word for
+        # word (a second "continue", a second "Done.") is still its own
+        # event, while parallel hooks given the same payload still collapse.
+        "prompt_id": data.get("prompt_id"),
         "source": data.get("source"),
         "model": data.get("model"),
         "prompt": data.get("prompt"),
         "tool_name": data.get("tool_name"),
         "tool_use_id": data.get("tool_use_id"),
         "tool_input": data.get("tool_input"),
-        "tool_error": data.get("tool_error"),
+        # PostToolUseFailure carries the reason as ``error``.
+        "tool_error": data.get("tool_error") or data.get("error"),
         "is_interrupt": data.get("is_interrupt"),
         "last_assistant_message": data.get("last_assistant_message"),
         "stop_hook_active": data.get("stop_hook_active"),
@@ -90,6 +105,8 @@ def build_event_props(data: dict) -> dict:
     for field in TRUNCATED_FIELDS:
         if field in props:
             props[field] = _truncate(props[field])
+    if "tool_error" in props:
+        props["tool_error"] = _truncate(props["tool_error"], MAX_ERROR_CHARS)
     if response is not None:
         props["tool_response_chars"] = len(_text(response))
     return props

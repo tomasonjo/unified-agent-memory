@@ -77,10 +77,15 @@ def user_id() -> str:
     """Resolve the user identity every record is stamped with.
 
     An email address, because it is the one identity that stays the same
-    across harnesses and machines. Resolution order: the account logged
-    in to the harness, then the email in the machine's git configuration.
+    across harnesses and machines. Resolution order: ``UAM_USER_ID`` when
+    set, then the account logged in to the harness, then the email in the
+    machine's git configuration. The override is how a shared deployment
+    maps one person's several addresses to one id: set the same value on
+    each of their machines. A locally configured email is a key, not proof
+    of identity.
     """
-    return _claude_account_email() or _git_email() or "unknown"
+    override = (os.getenv("UAM_USER_ID") or "").strip()
+    return override or _claude_account_email() or _git_email() or "unknown"
 
 
 def _git_main_root(directory: Path) -> Path | None:
@@ -189,27 +194,72 @@ def data_dir() -> Path:
 # Named on purpose. An unnamed constraint gets a name Neo4j derives from
 # its schema, and that same derived name is given to the backing index —
 # so the two are only ever addressable by a hash the plugin never chose.
+# Each entry is (name, label, property, statement). The User and Project
+# anchors are MERGEd by capture, so their keys need uniqueness too: without
+# it, two sessions starting at once could each create the same person.
 SESSION_SCHEMA = (
     (
         "uam_session_id",
+        "Session",
+        "session_id",
         "CREATE CONSTRAINT uam_session_id IF NOT EXISTS "
         "FOR (s:Session) REQUIRE s.session_id IS UNIQUE",
     ),
     (
         "uam_session_event_id",
+        "SessionEvent",
+        "event_id",
         "CREATE CONSTRAINT uam_session_event_id IF NOT EXISTS "
         "FOR (e:SessionEvent) REQUIRE e.event_id IS UNIQUE",
     ),
+    (
+        "uam_user_id",
+        "User",
+        "user_id",
+        "CREATE CONSTRAINT uam_user_id IF NOT EXISTS "
+        "FOR (u:User) REQUIRE u.user_id IS UNIQUE",
+    ),
+    (
+        "uam_project_id",
+        "Project",
+        "id",
+        "CREATE CONSTRAINT uam_project_id IF NOT EXISTS "
+        "FOR (p:Project) REQUIRE p.id IS UNIQUE",
+    ),
 )
+
+
+def _unique_keys(session) -> set[tuple[str, str]] | None:
+    """(label, property) pairs that already carry a uniqueness guarantee.
+
+    Checked by schema rather than by name, so an equivalent constraint that
+    another application created under its own name counts too. ``None``
+    when the user may not list constraints.
+    """
+    try:
+        records = session.run(
+            "SHOW CONSTRAINTS YIELD type, labelsOrTypes, properties "
+            "WHERE type IN ['UNIQUENESS', 'NODE_PROPERTY_UNIQUENESS', 'NODE_KEY'] "
+            "RETURN labelsOrTypes, properties"
+        )
+        return {
+            (labels[0], props[0])
+            for labels, props in (tuple(r.values()) for r in records)
+            if len(labels) == 1 and len(props) == 1
+        }
+    except Exception:
+        return None
 
 
 def _ensure_session_schema(session) -> None:
     """Create the uniqueness constraints, tolerating pre-existing schema.
 
-    Each statement gets its own transaction. Schema commands do not
-    compose into one atomic unit the way writes do, so folding both into
-    a single ``execute_write`` means a failure on the second rolls back
-    the first and the graph ends up with neither constraint.
+    This runs on every captured event, so the common case, where all of
+    them exist, costs one listing instead of one statement per constraint.
+    Each missing one gets its own transaction. Schema commands do not
+    compose into one atomic unit the way writes do, so folding them into
+    a single ``execute_write`` means a failure on a later one rolls back
+    the earlier ones and the graph ends up with none.
 
     Failures are reported and swallowed rather than raised. ``IF NOT
     EXISTS`` covers an existing constraint, but not a leftover backing
@@ -220,71 +270,90 @@ def _ensure_session_schema(session) -> None:
     duplicates on its own, so a missing constraint costs atomicity under
     concurrent writes, never the event itself.
     """
-    for name, statement in SESSION_SCHEMA:
+    existing = _unique_keys(session)
+    for name, label, prop, statement in SESSION_SCHEMA:
+        if existing is not None and (label, prop) in existing:
+            continue
         try:
             session.run(statement).consume()
         except Exception as exc:
             print(f"[uam] schema: {name} not created: {exc}", file=sys.stderr)
 
 
-def _append_event(tx, session_id: str, event_props: dict) -> None:
+# The owner and project are written once, when the session is created, and
+# kept afterwards: a session has one owner and one project even if a later
+# event resolves differently (a changed git email, a cd into another repo).
+# The anchors are MERGEd only while missing, which also gives sessions
+# captured before they existed their anchors on the next event. A
+# SessionStart that resets the context of an existing session (compact, or
+# clear when the harness keeps the session id) starts a new context
+# generation; recall uses it to tell what the current context has seen.
+APPEND_EVENT = """
+MERGE (s:Session {session_id: $session_id})
+ON CREATE SET s.created_at = datetime($timestamp)
+SET s.user_id = coalesce(s.user_id, $user_id),
+    s.project_id = coalesce(s.project_id, $project_id),
+    s.context_generation = coalesce(s.context_generation, 1),
+    s.harness = $harness,
+    s.model = coalesce($model, s.model)
+WITH s
+FOREACH (_ IN CASE WHEN NOT EXISTS { (:User)-[:HAS_SESSION]->(s) }
+                   THEN [1] ELSE [] END |
+    MERGE (u:User {user_id: s.user_id})
+    MERGE (u)-[:HAS_SESSION]->(s)
+)
+FOREACH (_ IN CASE WHEN NOT EXISTS { (:Project)-[:HAS_SESSION]->(s) }
+                   THEN [1] ELSE [] END |
+    MERGE (p:Project {id: s.project_id})
+    ON CREATE SET p.name = s.project_id
+    MERGE (p)-[:HAS_SESSION]->(s)
+)
+WITH s
+OPTIONAL MATCH (dup:SessionEvent {event_id: $event_id})
+WITH s, dup
+WHERE dup IS NULL
+CREATE (e:SessionEvent $event_props)
+SET e.timestamp = datetime($timestamp)
+CREATE (s)-[:HAS_EVENT]->(e)
+WITH s, e
+OPTIONAL MATCH (s)-[old_latest:LATEST_EVENT]->(prev:SessionEvent)
+DELETE old_latest
+WITH s, e, prev
+FOREACH (_ IN CASE WHEN prev IS NOT NULL THEN [1] ELSE [] END |
+    CREATE (prev)-[:NEXT]->(e)
+)
+FOREACH (_ IN CASE WHEN prev IS NULL THEN [1] ELSE [] END |
+    CREATE (s)-[:FIRST_EVENT]->(e)
+)
+FOREACH (_ IN CASE WHEN prev IS NOT NULL AND $resets_context THEN [1] ELSE [] END |
+    SET s.context_generation = s.context_generation + 1
+)
+CREATE (s)-[:LATEST_EVENT]->(e)
+"""
+
+
+def _append_event(tx, event_props: dict, project: str, model: str | None) -> None:
     tx.run(
-        """
-        MERGE (s:Session {session_id: $session_id})
-        ON CREATE SET s.created_at = datetime($timestamp)
-        SET s.user_id = $user_id, s.harness = $harness,
-            s.model = coalesce($model, s.model)
-        WITH s
-        OPTIONAL MATCH (dup:SessionEvent {event_id: $event_id})
-        WITH s, dup
-        WHERE dup IS NULL
-        CREATE (e:SessionEvent $event_props)
-        SET e.timestamp = datetime($timestamp)
-        CREATE (s)-[:HAS_EVENT]->(e)
-        WITH s, e
-        OPTIONAL MATCH (s)-[old_latest:LATEST_EVENT]->(prev:SessionEvent)
-        DELETE old_latest
-        WITH s, e, prev
-        FOREACH (_ IN CASE WHEN prev IS NOT NULL THEN [1] ELSE [] END |
-            CREATE (prev)-[:NEXT]->(e)
-        )
-        FOREACH (_ IN CASE WHEN prev IS NULL THEN [1] ELSE [] END |
-            CREATE (s)-[:FIRST_EVENT]->(e)
-        )
-        CREATE (s)-[:LATEST_EVENT]->(e)
-        """,
-        session_id=session_id,
+        APPEND_EVENT,
+        session_id=event_props["session_id"],
         user_id=event_props.get("user_id"),
+        project_id=project,
         harness=harness(),
-        model=event_props.get("model")
-        or _transcript_model(event_props.get("transcript_path"))
-        or None,
+        model=model,
         timestamp=event_props.get("timestamp"),
         event_id=event_props.get("event_id"),
         event_props=event_props,
-    )
+        resets_context=event_props.get("event_name") == "SessionStart"
+        and event_props.get("source") in ("compact", "clear"),
+    ).consume()
 
 
-def append_session_event(session_id: str, event_name: str, props: dict) -> str:
-    """Append one :SessionEvent to the per-session chain in Neo4j.
+def event_record(session_id: str, event_name: str, props: dict) -> tuple[str, dict]:
+    """The event id and the properties ``append_event`` stores for ``props``.
 
-    Only harness lifecycle events become chain entries. The injection
-    hook appends the same SessionStart event the capture hook does (the
-    shared content hash collapses the two writes into one node) and then
-    records what it injected on that node via ``set_event_props``. The
-    graph shape mirrors the meta-knowledge-graph sister project::
-
-        (:Session)-[:FIRST_EVENT]->(:SessionEvent)-[:NEXT]->(:SessionEvent)...
-        (:Session)-[:HAS_EVENT]->(every :SessionEvent)
-        (:Session)-[:LATEST_EVENT]->(the newest :SessionEvent)
-
-    The event id is a hash of the event's own content (timestamp excluded),
-    so the same payload delivered to two parallel hook configs collapses to
-    one node; the uniqueness constraint makes the dedupe atomic. Returns
-    the event id.
+    The id is a hash of the event's own content (timestamp excluded), so
+    every hook that appends the same payload computes the same id.
     """
-    from neo4j import GraphDatabase
-
     session_id = session_id or "unknown"
     payload_sig = sha1(
         json.dumps(props, sort_keys=True, default=str).encode("utf-8")
@@ -301,22 +370,74 @@ def append_session_event(session_id: str, event_name: str, props: dict) -> str:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
     )
+    return event_id, event_props
 
-    # Short timeouts on purpose: this runs on every lifecycle event, so an
-    # unreachable graph must cost a moment and one dropped event, never a
-    # stalled session. The small retry window still absorbs transient
-    # lock conflicts when parallel hooks write to the same session.
-    uri, user, password, database = neo4j_config()
-    with GraphDatabase.driver(
+
+def append_event(session, session_id: str, event_name: str, props: dict) -> str:
+    """``append_session_event`` on a Neo4j session the caller already holds."""
+    event_id, event_props = event_record(session_id, event_name, props)
+    # Resolved outside the transaction function, which the driver may
+    # retry: the project asks git, and the model reads the transcript.
+    project = project_id(event_props.get("cwd"))
+    model = (
+        event_props.get("model")
+        or _transcript_model(event_props.get("transcript_path"))
+        or None
+    )
+    _ensure_session_schema(session)
+    session.execute_write(_append_event, event_props, project, model)
+    return event_id
+
+
+def graph_driver(connection_timeout: float = 2.0, max_retry_time: float = 5.0):
+    """A driver for the configured graph, with the hooks' short timeouts.
+
+    Short on purpose: hooks run inside a session, so an unreachable graph
+    must cost a moment and one dropped record, never a stalled session.
+    The small retry window still absorbs transient lock conflicts when
+    parallel hooks write to the same session.
+    """
+    import logging
+
+    from neo4j import GraphDatabase
+
+    # The memory queries name labels and relationship types that a young
+    # graph does not have yet (no summary has been written, nothing has
+    # been recalled). The server's notices about that are expected, and
+    # would otherwise land on the hook's stderr and in the worker's log.
+    logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
+    uri, user, password, _ = neo4j_config()
+    return GraphDatabase.driver(
         uri,
         auth=(user, password),
-        connection_timeout=2.0,
-        max_transaction_retry_time=5.0,
-    ) as driver:
+        connection_timeout=connection_timeout,
+        max_transaction_retry_time=max_retry_time,
+    )
+
+
+def append_session_event(session_id: str, event_name: str, props: dict) -> str:
+    """Append one :SessionEvent to the per-session chain in Neo4j.
+
+    Only harness lifecycle events become chain entries. The injection
+    hook appends the same SessionStart event the capture hook does (the
+    shared content hash collapses the two writes into one node) and then
+    records what it injected on that node via ``set_event_props``. The
+    graph shape mirrors the meta-knowledge-graph sister project::
+
+        (:Session)-[:FIRST_EVENT]->(:SessionEvent)-[:NEXT]->(:SessionEvent)...
+        (:Session)-[:HAS_EVENT]->(every :SessionEvent)
+        (:Session)-[:LATEST_EVENT]->(the newest :SessionEvent)
+        (:User)-[:HAS_SESSION]->(:Session)<-[:HAS_SESSION]-(:Project)
+
+    The event id is a hash of the event's own content (timestamp excluded),
+    so the same payload delivered to two parallel hook configs collapses to
+    one node; the uniqueness constraint makes the dedupe atomic. Returns
+    the event id.
+    """
+    database = neo4j_config()[3]
+    with graph_driver() as driver:
         with driver.session(database=database) as session:
-            _ensure_session_schema(session)
-            session.execute_write(_append_event, session_id, event_props)
-    return event_id
+            return append_event(session, session_id, event_name, props)
 
 
 def set_event_props(event_id: str, props: dict) -> None:
@@ -395,6 +516,7 @@ ENV_KEYS = (
     "NEO4J_PASSWORD",
     "NEO4J_DATABASE",
     "UAM_AGENT_NAME",
+    "UAM_USER_ID",
     "UAM_PROJECT_ID",
     "UAM_LLM_BACKEND",
     "UAM_LLM_MODEL",
@@ -434,12 +556,16 @@ ENV_TEMPLATE = """\
 # ANTHROPIC_API_KEY=
 # GEMINI_API_KEY=
 
-# Episodic memory. The project key defaults to the repository's
-# directory name; UAM_PROJECT_ID pins it, but set here it pins every
-# repository on this machine, so prefer exporting it per repository.
-# An embedding model (a LiteLLM model string, paid for by its provider
-# key) adds similarity search to the memory tools; without one they
-# search stored text only. The dimensions must match the model.
+# Episodic memory. The user key defaults to the email of the account
+# logged in to the harness, then git's user.email; UAM_USER_ID pins it,
+# so one person's machines and addresses share one id. The project key
+# defaults to the repository's directory name; UAM_PROJECT_ID pins it,
+# but set here it pins every repository on this machine, so prefer
+# exporting it per repository. An embedding model (a LiteLLM model
+# string, paid for by its provider key) adds similarity search to the
+# memory tools and recall; without one they search stored text only.
+# The dimensions must match the model.
+# UAM_USER_ID=
 # UAM_PROJECT_ID=
 # UAM_EMBEDDING_MODEL=openai/text-embedding-3-small
 # UAM_EMBEDDING_DIMENSIONS=1536

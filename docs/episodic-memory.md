@@ -1,13 +1,15 @@
 # Episodic memory: design
 
-Status: the memory MCP server (section 6) is implemented, in
-`mcp/server.py` and `hooks/episodes.py`. Everything else here is design;
-[section 9](#9-files) tracks each file. The source of truth is chapter 3 of
-the book, *Episodic Memory: Remembering What Happened*. This document
-turns that chapter into a build plan for this plugin, on top of what
-chapter 2 ships (event capture and system-prompt injection). Choices the
-chapter leaves open are marked **Decision**. Places where the chapter and
-this repository disagree are collected in
+Status: implemented. Capture writes the anchors (section 3),
+`hooks/extract_memory.py` consolidates (section 4), `hooks/recall.py`
+recalls (section 5), and the memory MCP server reads (section 6);
+[section 9](#9-files) tracks each file, and `tests/` checks section 10. The
+source of truth is chapter 3 of the book, *Episodic Memory: Remembering
+What Happened*. This document turns that chapter into a build plan for
+this plugin, on top of what chapter 2 ships (event capture and
+system-prompt injection). Choices the chapter leaves open are marked
+**Decision**. Places where the chapter and this repository disagree, and
+facts about the harness that the build turned up, are collected in
 [Conflicts to resolve](#11-conflicts-to-resolve).
 
 ## 1. Changes from the first design
@@ -50,6 +52,7 @@ chapter:
 (:Observation|SessionSummary)-[:INJECTED_IN]->(:Session)
 (:Observation|SessionSummary)-[:INJECTED_AT]->(:SessionEvent)
 (:Observation)-[:CITES]->(:Observation|SessionSummary)
+(:DisplayIdCounter {prefix, value})               // hands out o112, s41
 ```
 
 **Decision:** `CITES` names the link the chapter asks for when it says
@@ -60,10 +63,10 @@ extraction should "retain the originating memory references".
 | `User` | `user_id` |
 | `Project` | `id`, `name` |
 | `Session` | `project_id`, `display_id` (`s41`), `context_generation`, `extraction_lease_owner`, `extraction_lease_until`; `user_id` becomes write-once |
-| `SessionEvent` | On delivery events: `recall_block`, `recall_channel`, `recall_status` |
+| `SessionEvent` | `prompt_id` and, on a failed tool call, `tool_error` ([3](#3-capture-changes)); on delivery events: `recall_block`, `recall_channel`, `recall_status` |
 | `Observation` | `id`, `display_id` (`o112`), `project_id`, `session_id`, `type`, `title`, `facts`, `narrative`, `source_start`, `source_end`, `created_at`, `embedding` |
 | `SessionSummary` | `id`, `session_id`, `project_id`, `version`, `headline`, `request`, `progress`, `learned`, `next_steps`, `source_start`, `source_end`, `created_at`, `updated_at`, `embedding` |
-| `ExtractionRun` | `id`, `status`, `session_id`, `window_key`, `llm_model`, `event_count`, `created_at`, `input_summary_version`, `input_summary_json`, `output_summary_version`, `output_summary_json`, `input_excerpts_json`, `input_chars`, `input_trim_json`, `error` |
+| `ExtractionRun` | `id`, `status`, `session_id`, `window_key`, `llm_model`, `event_count`, `created_at`, `input_summary_version`, `input_summary_json`, `output_summary_version`, `output_summary_json`, `input_excerpts_json`, `input_chars`, `input_trim_json`, `error`, `overflow` |
 
 Neo4j cannot constrain relationship counts, so the writer maintains them:
 each session has one owner, one project, and at most one summary; each
@@ -75,21 +78,24 @@ The schema uses named constraints and indexes, like chapter 2's:
 
 - Uniqueness constraints on `User.user_id`, `Project.id`,
   `Observation.id`, `Observation.display_id`, `Session.display_id`,
-  `SessionSummary.id`, and `ExtractionRun.id`.
+  `SessionSummary.id`, `ExtractionRun.id`, and `DisplayIdCounter.prefix`.
 - A fulltext index, `episode_text`, over `Observation|SessionSummary` on
   the eight text fields in the chapter's index listing.
 - Vector indexes `observation_embedding` and `summary_embedding`, created
   only when an embedding model is configured and sized by
   `UAM_EMBEDDING_DIMENSIONS`.
-- Range indexes on `project_id` and `source_end` for both artifact labels,
-  to serve recency listings.
+- Composite range indexes on `(project_id, source_end)` for both artifact
+  labels (`uam_observation_recency`, `uam_summary_recency`), to serve
+  recency listings.
 
-The MCP server creates the retrieval indexes (the fulltext index, plus the
-vector indexes when embeddings are configured) on its first search, and
-the extraction worker creates the constraints and range indexes. Both
-wait on `db.awaitIndex` before relying on an index. To change the fields of an
-existing fulltext index, drop it and recreate it: `IF NOT EXISTS` keeps
-the old definition.
+Capture creates the `User` and `Project` constraints, because it MERGEs
+those anchors. The extraction worker creates the other constraints, the
+range indexes, and the retrieval indexes, so the retrieval indexes exist
+once consolidation has written anything. The MCP server still creates the
+retrieval indexes on its first search, for a store that has none yet.
+Both wait on `db.awaitIndex` before relying on an index. To change the
+fields of an existing fulltext index, drop it and recreate it: `IF NOT
+EXISTS` keeps the old definition.
 
 ## 3. Capture changes
 
@@ -108,17 +114,32 @@ In `hooks/common.py`:
   for Claude Code in the repository's committed `.claude/settings.json`
   `env` block, because a value in the user-level env file pins every
   repository on the machine.
-- **User.** `user_id()` returns `UAM_USER_ID` when set, and otherwise the
-  resolution chapter 2 already uses. A shared deployment sets the same id
-  on each of a person's machines.
-- **Anchors.** When `_append_event` creates a session, it sets `user_id`,
-  `project_id`, and `context_generation: 1`, and it keeps them afterwards
-  with `coalesce` (the current code overwrites `user_id` on every event).
-  It MERGEs `(:User)-[:HAS_SESSION]->(s)` and
-  `(:Project)-[:HAS_SESSION]->(s)` from the stored values. A session
-  therefore keeps one owner and one project even if a later event resolves
-  differently. Sessions captured before this change pick up their anchors
-  on their next event; a one-off backfill covers the rest.
+- **User** (implemented). `user_id()` returns `UAM_USER_ID` when set, and
+  otherwise the resolution chapter 2 already uses. A shared deployment
+  sets the same id on each of a person's machines.
+- **Anchors** (implemented). When `_append_event` creates a session, it
+  sets `user_id`, `project_id`, and `context_generation: 1`, and it keeps
+  them afterwards with `coalesce` (chapter 2's code overwrote `user_id` on
+  every event). It MERGEs `(:User)-[:HAS_SESSION]->(s)` and
+  `(:Project)-[:HAS_SESSION]->(s)` from the stored values, only while they
+  are missing. A session therefore keeps one owner and one project even if
+  a later event resolves differently. Sessions captured before this change
+  pick up their anchors on their next event, and the extraction worker
+  backfills any session it processes.
+- **Context generation** (implemented). The append that creates a
+  `SessionStart` event with source `compact` or `clear` in a session that
+  already has events increments `context_generation`. The content hash
+  makes that append happen once, whichever of the three SessionStart hooks
+  lands first.
+- **Schema check** (implemented). Capture now checks its four constraints
+  with one `SHOW CONSTRAINTS` and creates only the missing ones. Before,
+  it ran one `CREATE CONSTRAINT` per constraint on every event.
+- **Two capture fixes** (implemented, see [conflict 9](#11-conflicts-to-resolve)).
+  A failed tool call keeps its reason as `tool_error`, cut to 1,000
+  characters: Claude Code sends it as `error`, so chapter 2 had stored
+  none. And every event keeps the harness's `prompt_id`, which enters the
+  content hash, so a turn that repeats an earlier prompt or closing
+  message word for word is not dropped as a duplicate.
 - **Tool results** stay unstored. Recording what the memory tools returned
   belongs to recall, in [5.3](#53-delivery-records-and-duplicate-suppression).
 
@@ -127,25 +148,35 @@ In `hooks/common.py`:
 ### 4.1 Trigger
 
 `hooks/extract_memory.py` runs on `Stop` and `SessionEnd`, in its own hook
-group beside capture. Its foreground part must return quickly:
+group beside capture. Its foreground part must return quickly, and on
+`SessionEnd` it must: Claude Code gives all of an event's `SessionEnd`
+hooks a shared budget of 1.5 seconds.
 
 1. It does nothing when `UAM_IN_LLM_SUBPROCESS` is set.
-2. It appends the triggering event itself with `append_session_event()`.
-   Chapter 2's injection hook uses the same pattern for `SessionStart`:
-   both hooks write the same content-hashed event, so whichever lands
-   first, the closing event is committed before anything depends on it.
-   That is how this adapter establishes readiness without a sleep. Hooks
-   for the turn's earlier events have already returned when `Stop` fires,
-   so the closing event is the only one whose capture can still be in
-   flight.
-3. It starts the worker detached (`start_new_session=True`, stdio closed,
-   stderr to `~/.unified-agent-memory/logs/extract.log`) and exits 0.
+2. It starts the worker detached (`start_new_session=True`, the hook
+   payload on its stdin, stdout closed, stderr to
+   `~/.unified-agent-memory/logs/extract.log`) and exits 0. Measured: the
+   hook returns in about 0.1 seconds.
+3. The worker's first act is to append the triggering event itself with
+   `append_event()`. Chapter 2's injection hook uses the same pattern for
+   `SessionStart`: both hooks write the same content-hashed event, so
+   whichever lands first, the closing event is committed before anything
+   depends on it. That is how this adapter establishes readiness without a
+   sleep. Hooks for the turn's earlier events have already returned when
+   `Stop` fires, so the closing event is the only one whose capture can
+   still be in flight. **Decision:** the append moved from the foreground
+   into the worker so that no graph round trip sits inside the
+   `SessionEnd` budget.
 
 **Decision:** the same script also runs on `SessionStart` (`startup`) in
-sweep mode. It starts workers for this user's sessions in the project that
-still hold ready, unprocessed windows and no live lease. This catches up
-work interrupted by a stopped machine or a failed provider. The chapter
+sweep mode. It starts one worker for this user's sessions in the project
+that still hold ready, unprocessed windows and no live lease. This catches
+up work interrupted by a stopped machine or a failed provider. The chapter
 says such events must stay eligible but does not say what retries them.
+The sweep is bounded: sessions active in the last 7 days, at most 5 per
+sweep, newest first. It catches up interrupted work; it is not a backfill
+of history. `extract_memory.py --session ID` consolidates any one session
+by hand.
 
 ### 4.2 Window and input budget
 
@@ -181,22 +212,38 @@ the order: the window is always rendered chronologically.
    characters. The start is kept because a prompt's ask comes first, and
    the end because an answer's conclusion comes last. Capture keeps no
    assistant text between tool calls, so these are the only assistant
-   messages the record holds.
+   messages the record holds. Not every `SubagentStop` is a subagent's
+   report: Claude Code runs internal agents for its own features, such as
+   prompt suggestions after every turn, and their "final message" is a
+   guess at the user's next prompt ("yes, commit it"). Only agents Claude
+   spawns fire `SubagentStart`, so a stop counts as a report only when the
+   session captured a start for its agent id. The agent type cannot decide
+   it: an internal agent's is empty, or the session's own agent name under
+   `--agent` ([conflict 11](#11-conflicts-to-resolve)).
 2. **Recalled memory.** The ids and titles of memory delivered in the
    window go in, so the model can attribute a restated claim to its
    origin. The full recall blocks never do.
 3. **Tool calls.** Each call gets one line, taken from `PostToolUse` or
-   `PostToolUseFailure`; the matching `PreToolUse` is skipped. The line
-   holds the tool name and, for a failure, a one-line error of at most 200
-   characters. That error is the only tool output that reaches the model.
-   Subagent starts and compactions appear as one-line markers. Inputs step
-   down only as far as the budget requires:
+   `PostToolUseFailure`; the matching `PreToolUse` is skipped, and a
+   `PreToolUse` that no result followed is shown as "no result recorded".
+   The line holds the tool name and, for a failure, a one-line error of at
+   most 200 characters, or "interrupted by the user". That error is the
+   only tool output that reaches the model. Subagent starts and
+   compactions appear as one-line markers. Inputs step down only as far as
+   the budget requires:
    1. Input up to 1,000 characters.
    2. Input up to 200 characters.
    3. Identifying fields only: a file path, the first line of a command, a
-      search pattern, a URL, or a query.
+      search pattern, a URL, or a query. When capture cut an input so its
+      JSON no longer parses, the field is still read from the text.
    4. Consecutive calls to the same tool collapsed into one line with a
       count, such as `Read ×12: a.py, b.py, … +10`.
+   5. **Decision:** every call to one tool between two messages counted
+      on one line, with failed calls and calls without a result keeping
+      lines of their own (up to 10). Level 4 does nothing for a turn that
+      alternates `Read`, `Edit`, and `Bash`, and real turns do: without
+      this level, a turn of 400 alternating calls cut its messages to
+      about 4,000 characters.
 
    Read-only tools (reads, searches, fetches, and graph reads) step down a
    level before actions do (edits, writes, commands, and unknown MCP
@@ -205,7 +252,14 @@ the order: the window is always rendered chronologically.
 
 The renderer works from an allowlist of fields. Tool outputs, the injected
 system prompt (`prompt_content`), full recall blocks, and bookkeeping such
-as `transcript_path` never reach the model.
+as `transcript_path` never reach the model. Measured on two real captured
+turns of 291 and 342 events (141 and 168 tool calls), the whole input came
+to about 26,700 and 25,300 characters with every message whole.
+
+**Decision:** a window that renders no message and no tool call (a side
+agent's stop followed by `SessionEnd`, say) is committed as a completed run
+without a model call, with no `llm_model`. There is nothing to interpret,
+and the run still marks its events processed.
 
 If the window still doesn't fit with the messages at their floor and every
 tool call collapsed, it is split at event boundaries before any model call,
@@ -242,7 +296,19 @@ The writer, not the model, decides what is stored:
   other four fields at most 1,500. `null`, or a copy of the previous
   summary, means unchanged.
 - `cites` keeps only ids that were delivered to this session.
+- More observations than allowed means more developments than the window
+  holds, which is overflow.
 - Anything else counts as a failure ([4.5](#45-leases-failures-and-overflow)).
+  Output that breaks a limit is rejected, never shortened: cutting a title
+  could drop the qualification that gives it its meaning.
+
+**Decision:** a rejected response is retried with the reason appended to
+the prompt ("Your previous response was rejected: observation 3 fact is
+305 characters; the limit is 300."). On two real captured turns, Haiku's
+output parsed both times (inside a code fence, which the parser accepts);
+one validated outright, and the other broke the fact limit by five
+characters and came back valid on the retry. A failed model call is not
+retried here, because `llm_complete()` already retries it.
 
 ### 4.4 Commit
 
@@ -250,11 +316,13 @@ When embeddings are configured, the worker computes them before the
 transaction. The transaction then runs these steps:
 
 1. **Check.** It writes to the session before reading it, which takes the
-   session's lock. It then confirms three things: this worker holds an
-   unexpired lease, the summary `version` is still the one read at
-   selection (or there is still no summary), and no window event has been
-   processed in the meantime. Any mismatch discards the result, so a stale
-   worker never overwrites newer progress.
+   session's lock: `SET s._uam_lock = true`, removed again before the
+   commit, the pattern the Neo4j manual gives for read-then-write. It then
+   confirms three things: this worker holds an unexpired lease, the
+   summary `version` is still the one read at selection (or there is still
+   no summary), and no window event has been processed in the meantime.
+   Any mismatch rolls the transaction back and discards the result, so a
+   stale worker never overwrites newer progress.
 2. **Run.** It creates
    `ExtractionRun {id: "run:<session_id>:<window_key>", status: "completed", …}`
    with its `PROCESSED_EVENT` edges and both summary snapshots. An absent
@@ -262,7 +330,8 @@ transaction. The transaction then runs these steps:
 3. **Observations.** It locks the project the same way, reads the tail,
    and creates the observations in output order. Each one gets:
    - the id `obs:<project_id>:<session_id>:<window_key>:<position>`;
-   - a `display_id` from a counter;
+   - a `display_id` from the `(:DisplayIdCounter {prefix: 'o'})` counter,
+     incremented under its node lock;
    - `project_id` and `session_id`;
    - `source_start` and `source_end` from the window's first and last
      event;
@@ -275,7 +344,8 @@ transaction. The transaction then runs these steps:
    five fields. `source_start` comes from the session's first event and
    `source_end` from the window's last. The summary gets an embedding of
    the new text, or no embedding, never a stale one.
-5. **Display id.** It gives the session a `display_id` if it has none.
+5. **Display id.** It gives the session a `display_id` if it has none and
+   now has a summary or an observation.
 
 ### 4.5 Leases, failures, and overflow
 
@@ -284,19 +354,27 @@ transaction. The transaction then runs these steps:
   transaction that writes the node before reading the lease, so two
   workers can never both find it free. **Decision:** a lease lasts 10
   minutes and is renewed for each window; another worker can take over an
-  expired one.
+  expired one. When a worker runs out of windows it releases the lease and
+  then looks once more: a window whose trigger found the lease held a
+  moment earlier is picked up instead of waiting for the next turn.
 - **Failure.** A failed model call or invalid output is recorded as
   `ExtractionRun {status: "failed", session_id, window_key, error}` in its
   own transaction and without edges, so the window's events stay eligible.
-  After three failures in a row, the worker stops and leaves the window to
-  the next trigger or sweep.
+  A failed call stops the worker at once. After three invalid responses in
+  a row, the worker stops and leaves the window to the next trigger or
+  sweep.
 - **Overflow.** `overflow: true` or truncated output is recorded as
   `status: "overflow"`, and the window is retried in parts. It is split
-  first at the turn boundaries inside it, then in halves, and each part is
-  committed on its own. The overflowed window itself is never committed,
-  so it and its parts can never both be. A single-event window cannot be
-  split; it is retried once with a limit of six observations and a larger
-  output allowance.
+  first at the turn boundaries inside it (a prompt that follows an earlier
+  prompt; lifecycle events before the first prompt belong to its turn),
+  then in halves, and each part is committed on its own. The overflowed
+  window itself is never committed, so it and its parts can never both be.
+  A window too large for the input budget is split the same way before any
+  call. A single-event window cannot be split; it is retried once with a
+  limit of six observations and a larger output allowance. **Decision:** if
+  the model still reports overflow then, the six observations are
+  committed and the run carries `overflow: true`, rather than leaving the
+  session stuck on one event.
 - A completed window is never selected again, so reprocessing adds
   nothing.
 
@@ -304,8 +382,11 @@ transaction. The transaction then runs these steps:
 
 `hooks/recall.py` owns recall through three entry points. It shares
 retrieval and rendering with the MCP server through `hooks/episodes.py`.
-Each entry point works within a time budget, with the hook `timeout` as a
-backstop, and returns nothing when the store is slow or unavailable.
+Each entry point works within a time budget (5 seconds for the recap, 3
+for prompt-time episodes including the query embedding, 5 for recording a
+tool delivery), with the hook `timeout` as a backstop, and returns nothing
+when the store is slow or unavailable. Measured: the recap hook returns in
+about 0.2 seconds once uv has its environment cached.
 
 ### 5.1 Session-start recap
 
@@ -318,11 +399,18 @@ hook.
   generation, since the transcript replays what was delivered.
 - **Selection** needs no model call. It takes up to three other sessions
   in the project that have a summary, and up to five observations from
-  other sessions, newest `source_end` first in both cases. For the current
-  user's most recent session, it adds that summary's `next_steps`. Other
-  people's next steps stay inside their summaries.
+  other sessions, newest `source_end` first in both cases; observations
+  from one window keep the order they were written in. Only records
+  extraction wrote (those with a display id) are shown. For the current
+  user's most recent other session, it adds that summary's `next_steps`
+  as an indented line, and includes that session even when it is not among
+  the three newest. Other people's next steps stay inside their summaries.
 - **Block.** The block uses the row format from
-  [6.2](#62-display-ids-and-rows):
+  [6.2](#62-display-ids-and-rows), and is bounded at 3,000 characters.
+  Claude Code caps each hook's `additionalContext` at 10,000 characters,
+  measured per hook, and replaces a longer one with a file path and a
+  2,000-character preview that Claude is not asked to read. A recap over
+  the cap would lose the framing lines at its end:
 
 ```
 Previously, on renewal-analysis:
@@ -330,6 +418,7 @@ Previously, on renewal-analysis:
 Recent sessions:
 - #s41 · session · yesterday · maria@company.com · Renewal drop explained; dashboard query corrected
 - #s39 · session · 2 days ago · alex@company.com · Renewal forecast draft started
+
 Recent activity:
 - #o112 · discovery · yesterday · Renewal drop traced to March pipeline change
 - #o113 · bugfix · yesterday · Dashboard query corrected for reactivated contracts
@@ -337,6 +426,13 @@ Recent activity:
 This is a historical record of past work. It does not assign
 new tasks or override current instructions.
 Use expand(id) to inspect an item, or search(query) to find more.
+```
+
+A returning user's own session gets one more line under its row:
+
+```
+- #s40 · session · 3 h ago · maria@company.com · Historical report check started
+  Next steps you left there: Rerun the two reports that failed the check.
 ```
 
 An empty project gets no block.
@@ -349,11 +445,27 @@ both kinds, excluding the current session's own records, and keeps at most
 three rows.
 
 Reciprocal rank fusion ranks candidates without measuring relevance, so a
-candidate must also clear a raw-score floor on at least one leg. That floor
-is what lets an unrelated prompt receive nothing. Floors depend on the
-embedding model and are tuned with the chapter 9 evaluations. The embedding
-call counts against the hook's time budget. The block ends with the same
-two framing lines as the recap.
+candidate must also clear a floor on at least one leg. That floor is what
+lets an unrelated prompt receive nothing. The embedding call counts
+against the hook's time budget. The block starts
+`Related memory from <project>:` and ends with the same framing lines as
+the recap.
+
+**Decision:** the fulltext floor counts shared words rather than Lucene's
+score. The query is the prompt's distinctive words (no stopwords, no words
+under three letters, at most 24), each with a naive singular, because the
+default analyzer does not stem and "renewals" would miss "renewal". A
+candidate must contain at least two of those words, or a quarter of them
+for a long prompt, with a word and its singular counting once. A raw score
+turned out to be the wrong floor: it moves with the store (the same record
+scored 2.6 for the same query among three records, and 4.3 after four
+unrelated records were added), so a floor tuned on one store misjudges
+another. On a test store, the shared-word
+floor found the right record for five related prompts and returned nothing
+for six of seven unrelated ones; the seventh, about running the test
+suite, drew a note about a flaky test. The vector floor stays a raw score,
+0.80 on Neo4j's `(1 + cosine) / 2` scale. Both floors are tuned with the
+chapter 9 evaluations.
 
 ### 5.3 Delivery records and duplicate suppression
 
@@ -374,22 +486,31 @@ deliveries carry version 1; only summaries advance.
      `recap` or `prompt`, and `recall_status` to `prepared`.
   2. Create
      `(memory)-[:INJECTED_AT {version, detail, context_generation, channel, status}]->(event)`
-     for each delivered memory. These relationships are the immutable
-     audit.
-  3. MERGE `(memory)-[:INJECTED_IN]->(session)` and set the suppression
+     for each delivered memory. These relationships are the audit of the
+     delivery.
+  3. Return the block, then set `recall_status` (and the `INJECTED_AT`
+     status) to `returned`. Claude Code gives a hook no acceptance signal
+     beyond its own exit, so `returned` is the strongest status this
+     adapter can record. A `prepared` block without `returned` means the
+     hook died before delivering it.
+  4. MERGE `(memory)-[:INJECTED_IN]->(session)` and set the suppression
      state on it (`version`, `detail`, `context_generation`). This
      relationship answers "which sessions received this account?".
-  4. Return the block, then set `recall_status` to `returned`. Claude Code
-     gives a hook no acceptance signal beyond its own exit, so `returned`
-     is the strongest status this adapter can record. A `prepared` block
-     without `returned` means the hook died before delivering it.
+     **Decision:** this step comes after the return, so a block the hook
+     never delivered cannot suppress a later delivery. The state keeps the
+     newest version delivered in the generation, at the most detail
+     delivered for that version.
 - **Tool deliveries.** A `PostToolUse` entry, matched to the memory
   server's `search` and `expand`, records what those tools returned. It
   appends the same event, stores the response text on it as `recall_block`
   (bounded at 8,000 characters), and parses the display ids. It then
   records `INJECTED_AT` and `INJECTED_IN` with the channel `search` (detail
   `title`) or `expand` (`full` for the opened record, `title` for its
-  neighbor rows).
+  neighbor rows; an `events=true` page opens no record in full).
+  **Decision:** a delivery inside a subagent (the payload carries
+  `agent_id`) goes into the subagent's context, not the main one, so it is
+  recorded, with `agent_id` on `INJECTED_AT`, but never changes the main
+  context's suppression state.
 
 ## 6. MCP server
 
@@ -511,8 +632,8 @@ bounds:
 
 ## 8. Configuration
 
-These keys are added to `ENV_KEYS` and to the env-file template. All but
-`UAM_USER_ID` are in place:
+These keys are added to `ENV_KEYS` and to the env-file template. All are
+in place:
 
 | Key | Default | Purpose |
 |---|---|---|
@@ -522,28 +643,45 @@ These keys are added to `ENV_KEYS` and to the env-file template. All but
 | `UAM_EMBEDDING_DIMENSIONS` | `1536` | Must match the model; sizes the vector indexes |
 
 `hooks/llm.py` gains `embed_texts()` beside `llm_complete()`, and
-`embeddings_ready()` is true when a model is set.
+`embeddings_ready()` is true when a model is set. For consolidation it also
+gains `completion_model()`, the name recorded as a run's `llm_model`, and a
+`max_tokens` output allowance for the litellm backend. Its headless
+`claude -p` call now runs with `--tools ""`, `--strict-mcp-config`, and
+`--no-session-persistence`: a completion needs no tools, should not start
+every MCP server on the machine (this plugin's own among them) for each
+window, and should not leave a resumable session behind. A CLI too old for
+a flag gets a second try without them. An error that comes back as a
+result envelope with `is_error` now raises instead of passing its message
+off as the completion.
 
 ## 9. Files
 
 | File | Change | Status |
 |---|---|---|
-| `hooks/common.py` | Project and user resolution with overrides; write-once owner and project anchors in `_append_event`; new constraints and env keys | Project resolution and env keys done; the rest to do |
-| `hooks/episodes.py` | New: schema and indexes, retrieval (recent records, hybrid search with RRF, expand queries), row rendering, display-id resolution, delivery recording | Done except delivery recording |
-| `hooks/extract_memory.py` | New: the `Stop` and `SessionEnd` trigger, the `SessionStart` sweep, and the worker | To do |
-| `hooks/recall.py` | New: the `SessionStart` recap, `UserPromptSubmit` episodes, and `PostToolUse` records for the memory tools | To do |
-| `hooks/llm.py` | Adds `embed_texts()` | Done |
-| `hooks/hooks.json` | Wires the new entry points | To do |
+| `hooks/common.py` | Project and user resolution with overrides; write-once owner and project anchors in `_append_event`; context generation; new constraints, one-query schema check, and env keys | Done |
+| `hooks/log_event.py` | Keeps `prompt_id`, and a failed call's reason as `tool_error` | Done |
+| `hooks/episodes.py` | New: schema and indexes, retrieval (recent records, hybrid search with RRF, expand queries), row rendering, display-id resolution, recap and prompt-time selection, delivery recording | Done |
+| `hooks/extract_memory.py` | New: the `Stop` and `SessionEnd` trigger, the `SessionStart` sweep, and the worker | Done |
+| `hooks/recall.py` | New: the `SessionStart` recap, `UserPromptSubmit` episodes, and `PostToolUse` records for the memory tools | Done |
+| `hooks/llm.py` | Adds `embed_texts()`, `completion_model()`, `max_tokens`, and the headless-call flags | Done |
+| `hooks/hooks.json` | Wires the new entry points | Done |
 | `mcp/server.py` | New: the `memory` server, with `search`, `expand`, and the proxied read-only graph tools | Done |
 | `mcp/run_neo4j_mcp.py` | Removed; `mcp/server.py` took over its settings handling | Done |
 | `mcp.json` | `memory` replaces `neo4j` | Done |
-| `skills/recall/SKILL.md` | New | To do |
-| `README.md` | Documents all of the above | Memory server documented |
+| `skills/recall/SKILL.md` | New | Done |
+| `tests/` | New: the acceptance, concurrency, and budget checks from section 10 | Done |
+| `README.md` | Documents all of the above | Done |
 
 ## 10. Acceptance checks
 
 These checks come from the chapter's closing section. Each runs against a
-scratch database with two users on one pinned project:
+scratch database with two users on one pinned project. `tests/` automates
+all but checks 5 and 9, which depend on what the model writes, with a
+scripted model in place of the real one:
+
+```
+UAM_TEST_DATABASE=uamtest uv run --with pytest --with neo4j pytest tests
+```
 
 1. A fresh session by the second user gets a recap that names the first
    user's session and its `#s` id.
@@ -576,7 +714,9 @@ within 30,000 characters and keeps its prompt and closing message whole.
 
 Log the extraction cost per window, the injected characters per session,
 and the retrieval latency, so chapter 9's comparisons with and without
-memory have numbers to work from.
+memory have numbers to work from. The worker logs each window's outcome,
+input and output characters, and model seconds to `extract.log`; the
+delivered blocks are on their events.
 
 ## 11. Conflicts to resolve
 
@@ -598,26 +738,87 @@ memory have numbers to work from.
    chapter now says to pin the id per repository, matching this design,
    which reads `UAM_PROJECT_ID` like any other setting. It also says a
    worktree joins the project of its main checkout.
-4. **The session owner.** Capture overwrites `Session.user_id` on every
-   event, while the chapter needs one owner per session. Section 3 fixes
-   this.
+4. **The session owner. Resolved.** Capture overwrote `Session.user_id` on
+   every event, while the chapter needs one owner per session. Section 3
+   fixed this.
 5. **Tool results.** Chapter 2 stores no tool results, while chapter 3
    asks to record what `search` and `expand` returned. This design stores
    only the memory tools' responses, on the recall side
    ([5.3](#53-delivery-records-and-duplicate-suppression)). One sentence
    in the chapter would make that explicit.
-6. **The recording direction.** Chapter 3 calls `INJECTED_IN` and
-   `INJECTED_AT` "the same recording pattern used for standing
-   instructions". Chapter 2's `INJECTED_PROMPT` points from the event to
-   the prompt, whereas `INJECTED_AT` points from the memory to the event.
-   This design follows chapter 3.
-7. **A shared database.** The development database already holds 43
-   `Project {id, name}` nodes from another application, with the same
-   label and key the chapter uses. Point `NEO4J_DATABASE` at a database
-   dedicated to memory.
-8. **Fulltext over `facts`.** `facts` is a list. Confirm that the target
-   Neo4j version indexes `LIST<STRING>` in fulltext indexes; otherwise
-   also store a joined `facts_text` and index that.
+6. **The recording direction. Resolved in the chapter.** Chapter 3 used
+   to call `INJECTED_IN` and `INJECTED_AT` "the same recording pattern
+   used for standing instructions", while chapter 2's `INJECTED_PROMPT`
+   points from the event to the prompt. The chapter now says only that
+   recalled episodes follow chapter 2's rule (what entered a session is in
+   the record). This design follows chapter 3's direction, from the memory.
+7. **A shared database.** The development database is shared with the
+   meta-knowledge-graph plugin and other applications. Beyond 43
+   `Project {id, name}` nodes, it holds that plugin's constraints on
+   `Observation.id`, `User.id`, and `Project.id`, a fulltext index on
+   `Observation`, and a vector index on `Observation.embedding` with
+   filter properties. Recall shows only records that have a display id, so
+   another application's observations never reach a recap or a prompt, but
+   `search` filters by project only and would return that application's
+   observations for a project id they share. The other vector index does
+   not block `observation_embedding` (checked on 2026.08: its filter
+   properties make it a different schema), but it would index this
+   plugin's embeddings too. Capture now MERGEs `User` and `Project` anchors
+   and consolidation writes `Observation` nodes, so point `NEO4J_DATABASE`
+   at a database dedicated to memory before enabling the hooks.
+8. **Fulltext over `facts`. Resolved for Neo4j 2026.08.** `facts` is a
+   list. On 2026.08 the fulltext index covers it: a word that appears only
+   in an observation's facts finds it. An older Neo4j that does not index
+   `LIST<STRING>` would need a joined `facts_text` as well.
+9. **A failed call's reason. Fixed in capture.** Chapter 2's capture read
+   `tool_error` from `PostToolUseFailure`, but Claude Code sends the reason
+   as `error` (checked in Claude Code 2.1.268; the hooks reference shows
+   `tool_error`). So no failure reason was ever stored, and 4.2's one-line
+   error had nothing to show. Capture now keeps it, cut to 1,000
+   characters.
+10. **Repeated turns were dropped. Fixed in capture.** The event id is a
+    hash of the payload without its timestamp, so a turn that repeated an
+    earlier prompt ("continue") or closing message ("Done.") word for word
+    collapsed into the earlier event. For consolidation that silently
+    removed a window boundary. Capture now keeps the harness's
+    `prompt_id`, one id per user prompt, which enters the hash; parallel
+    hooks given the same payload still collapse. Chapter 2's description of
+    the hash stays true.
+11. **The harness's internal agents.** Claude Code runs internal agents
+    for some of its own features, such as prompt suggestions after every
+    turn and `/btw` side questions, and `SubagentStop` fires when one
+    finishes, with the suggestion as its "last assistant message" (the
+    hooks reference documents this under `SubagentStop` input). Their
+    `agent_type` is empty, or the session's own agent name when it runs
+    with `--agent`. Rendered as a subagent's report, "yes, commit it" would
+    read as work that happened. `SubagentStart` fires only for agents
+    Claude spawns, so extraction treats a stop as a report only when its
+    agent's start was captured ([4.2](#42-window-and-input-budget)). In
+    the captured sessions, all 34 internal stops lacked a start, and all 5
+    real subagents had one.
+12. **The `SessionEnd` budget.** Claude Code gives all `SessionEnd` hooks a
+    shared 1.5 seconds. The design's foreground append of the closing event
+    moved into the worker ([4.1](#41-trigger)). The chapter's listing, which
+    says the script "starts the worker and returns", is unaffected.
+13. **The relevance floor.** The chapter asks for "a relevance threshold
+    so that unrelated prompts receive nothing"; this design had assumed a
+    raw-score floor per leg. On fulltext, a raw score cannot be that
+    threshold, so the fulltext leg counts shared words
+    ([5.2](#52-prompt-time-episodes)).
+14. **Headless auth.** With the default `claude-cli` backend, every window
+    runs `claude -p`, which authenticates with the CLI's own login, not the
+    one a desktop app holds. When that login has expired, every call fails
+    with "OAuth session expired" until `claude` is logged in again from a
+    terminal. Failures are recorded as failed runs and leave their windows
+    eligible, so the next trigger or sweep catches up. The chapter's
+    "small model configured in chapter 2" is silent on this, and chapter 2
+    is where a sentence on keeping that login fresh belongs.
+15. **Index creation.** The chapter says to create the retrieval indexes
+    "during setup and wait for them to become available before depending
+    on retrieval". There is no separate setup step: the worker creates
+    them on its first run, before it writes anything, and the MCP server on
+    its first search, and both wait for them. The chapter's wording holds
+    if "setup" means that first run; saying so would remove the question.
 
 ## 12. Deferred
 
