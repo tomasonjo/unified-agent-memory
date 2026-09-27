@@ -1,6 +1,6 @@
 {
   "name": "unified-agent-memory",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Agent memory that works without being asked: capture every session event, and start each session from standing instructions, bundled or versioned in Neo4j.",
   "author": {
     "name": "Tomaz Bratanic"
