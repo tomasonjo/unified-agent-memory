@@ -38,8 +38,8 @@ FIRST_PASS = {
     "observations": [observation("discovery", FINDING), observation("bugfix", FIX)],
     "summary": summary(
         "Renewal drop explained; dashboard query corrected",
-        "Corrected the current dashboard query.",
-        "Check historical reports that cross March 3.",
+        "Corrected the current dashboard query. Historical reports that "
+        "cross March 3 are not yet checked.",
     ),
     "overflow": False,
 }
@@ -93,11 +93,11 @@ def test_a_turn_becomes_observations_and_a_summary(graph, model):
     head = graph.rows(
         "MATCH (s:Session {session_id: 's-maria'})-[:HAS_SUMMARY]->(sum) "
         "RETURN s.display_id AS display_id, sum.version AS version, "
-        "sum.id AS id, sum.next_steps AS next_steps, sum.project_id AS project"
+        "sum.id AS id, sum.progress AS progress, sum.project_id AS project"
     )[0]
     assert head == {
         "display_id": "s1", "version": 1, "id": "sum:s-maria",
-        "next_steps": "Check historical reports that cross March 3.",
+        "progress": "Corrected the current dashboard query. Historical reports that cross March 3 are not yet checked.",
         "project": PROJECT,
     }
 
@@ -141,14 +141,14 @@ def test_the_next_turn_adds_an_observation_and_a_summary_version(graph, model):
     scripted = model({
         "observations": [observation("change", "Historical renewal reports rerun")],
         "summary": summary("Renewal drop explained; history checked",
-                           "Corrected the query and reran two reports.", ""),
+                           "Corrected the query and reran two reports."),
         "overflow": False,
     })
     em.consolidate(["s-maria"])
 
     user = scripted.calls[0][1]["content"]
     assert "Earlier in this session" in user  # the opening prompt, as an excerpt
-    assert '"next_steps": "Check historical reports that cross March 3."' in user
+    assert "Historical reports that cross March 3 are not yet checked." in user
     assert "yes, commit it" not in user  # the side agent's guess is not work
 
     assert graph.value(
@@ -168,8 +168,8 @@ def test_the_next_turn_adds_an_observation_and_a_summary_version(graph, model):
         "r.output_summary_json AS output"
     )[0]
     assert second["out"] == 2
-    assert json.loads(second["input"])["next_steps"].startswith("Check historical")
-    assert json.loads(second["output"])["next_steps"] == ""
+    assert json.loads(second["input"])["progress"].endswith("are not yet checked.")
+    assert json.loads(second["output"])["progress"] == "Corrected the query and reran two reports."
 
 
 def test_a_failed_call_leaves_the_window_eligible(graph, model):
@@ -223,10 +223,10 @@ def test_overflow_splits_at_the_turn_boundary_and_never_commits_the_parent(graph
     scripted = model(
         {"observations": [], "summary": None, "overflow": True},
         {"observations": [observation("problem", "Renewal job profiling interrupted")],
-         "summary": summary("Renewal job performance", "Profiling started.", "Fix the join."),
+         "summary": summary("Renewal job performance", "Profiling started; the join still needs a fix."),
          "overflow": False},
         {"observations": [observation("bugfix", "Slow renewal join rewritten")],
-         "summary": summary("Renewal job fixed", "Join rewritten.", ""),
+         "summary": summary("Renewal job fixed", "Join rewritten."),
          "overflow": False},
     )
     em.consolidate(["s-maria"])
@@ -367,13 +367,13 @@ def test_other_work_between_turns_joins_the_timeline_not_the_session(graph, mode
     turn("s-alex", "Rotate the auth tokens.", [("Bash", {"command": "vault rotate"})],
          "Rotated the tokens.")
     model({"observations": [observation("change", "Auth tokens rotated")],
-           "summary": summary("Auth tokens rotated", "Rotated.", ""), "overflow": False})
+           "summary": summary("Auth tokens rotated", "Rotated."), "overflow": False})
     em.consolidate(["s-alex"])
 
     monkeypatch.setenv("UAM_USER_ID", MARIA)
     turn("s-maria", "Check the historical reports.", [], "Checked; all fine.")
     scripted = model({"observations": [observation("change", "Historical reports checked")],
-                      "summary": summary("History checked", "Checked.", ""),
+                      "summary": summary("History checked", "Checked."),
                       "overflow": False})
     em.consolidate(["s-maria"])
 

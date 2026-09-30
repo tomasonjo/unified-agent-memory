@@ -120,11 +120,10 @@ def test_window_key_ignores_order():
 GOOD = {
     "observations": [
         {"type": "discovery", "title": "Renewal drop traced to March pipeline change",
-         "facts": ["March 3 changed the classification."],
          "narrative": "Maria investigated the drop.", "cites": ["#o7", "o99"]},
     ],
     "summary": {"headline": "Renewal drop explained", "request": "Investigate",
-                "progress": "Diagnosed", "learned": "", "next_steps": "Check reports"},
+                "progress": "Diagnosed; reports unchecked", "outcome": ""},
     "overflow": False,
 }
 

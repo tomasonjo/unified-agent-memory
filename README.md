@@ -294,7 +294,7 @@ only). It announces four tools:
   reads like
   `#o112 · discovery · yesterday · Renewal drop traced to March pipeline change`.
 - **`expand(id, events?, cursor?)`** opens one row. An observation comes
-  with its facts, narrative, timeline neighbors, and source session. A
+  with its narrative, timeline neighbors, and source session. A
   session comes with its current summary and its observations.
   `events=true` pages the captured events behind a record; for an
   observation, that is exactly the events its extraction run processed.

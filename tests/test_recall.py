@@ -74,7 +74,7 @@ def test_a_fresh_analyst_starts_with_marias_handoff(maria_worked):
         "- #o2 · bugfix · just now · Dashboard query corrected for reactivated contracts",
     ]
     assert delivery.block.endswith(episodes.FRAMING)
-    assert "Next steps you left" not in delivery.block  # Maria's stay in her summary
+    assert "Where you left off" not in delivery.block  # Maria's stays in her summary
 
     event = graph.rows(
         "MATCH (e:SessionEvent {session_id: 's-analyst', event_name: 'SessionStart'}) "
@@ -101,14 +101,14 @@ def test_a_fresh_analyst_starts_with_marias_handoff(maria_worked):
 
     # Acceptance check 2: the recap's session id opens the unfinished work.
     handoff = episodes.expand(episodes.reader(graph.session), "#s1")
-    assert "Next steps: Check historical reports that cross March 3." in handoff
+    assert "Progress: Corrected the current dashboard query. Historical reports that cross March 3 are not yet checked." in handoff
 
 
-def test_a_returning_user_sees_their_own_next_steps(maria_worked, monkeypatch):
+def test_a_returning_user_sees_where_they_left_off(maria_worked, monkeypatch):
     monkeypatch.setenv("UAM_USER_ID", MARIA)
     delivery = recall.recap(maria_worked.session, start("s-maria-2"))
     assert (
-        "  Next steps you left there: Check historical reports that cross March 3."
+        "  Where you left off: Corrected the current dashboard query. Historical reports that cross March 3 are not yet checked."
         in delivery.block.splitlines()
     )
 
@@ -204,7 +204,7 @@ def test_the_delivery_keeps_the_handoff_the_session_received(maria_worked, model
          "All historical reports that cross March 3 were checked.")
     model({"observations": [observation("change", "Historical reports checked")],
            "summary": summary("Renewal drop resolved; history checked",
-                              "Corrected the query and checked history.", ""),
+                              "Corrected the query and checked history."),
            "overflow": False})
     em.consolidate(["s-maria"])
 

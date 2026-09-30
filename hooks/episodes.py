@@ -74,9 +74,15 @@ def reader(session):
 FULLTEXT_INDEX_QUERY = """
 CREATE FULLTEXT INDEX episode_text IF NOT EXISTS
 FOR (n:Observation|SessionSummary)
-ON EACH [n.title, n.facts, n.narrative,
-         n.headline, n.request, n.progress, n.learned, n.next_steps]
+ON EACH [n.title, n.narrative,
+         n.headline, n.request, n.progress, n.outcome]
 """
+
+# The fields FULLTEXT_INDEX_QUERY indexes. An index built from an older
+# field list is dropped and rebuilt, since IF NOT EXISTS leaves it alone.
+FULLTEXT_FIELDS = [
+    "title", "narrative", "headline", "request", "progress", "outcome",
+]
 
 VECTOR_INDEX_QUERY = """
 CREATE VECTOR INDEX {name} IF NOT EXISTS
@@ -153,9 +159,10 @@ def ensure_retrieval_indexes(session, dimensions: int | None = None) -> None:
     on its own, because schema commands do not compose into one
     transaction. Failures are reported rather than raised: search skips a
     leg whose index is missing. ``IF NOT EXISTS`` never updates an
-    existing definition, so changing the indexed fields means dropping the
-    index first.
+    existing definition, so a fulltext index over other fields is dropped
+    first and rebuilt.
     """
+    _drop_stale_fulltext(session)
     statements = [(FULLTEXT_INDEX, FULLTEXT_INDEX_QUERY)]
     if dimensions:
         for name, label in VECTOR_INDEXES.values():
@@ -173,6 +180,19 @@ def ensure_retrieval_indexes(session, dimensions: int | None = None) -> None:
             session.run("CALL db.awaitIndex($name, 30)", name=name).consume()
         except Exception as exc:
             print(f"[uam] index {name} unavailable: {exc}", file=sys.stderr)
+
+
+def _drop_stale_fulltext(session) -> None:
+    try:
+        record = session.run(
+            "SHOW FULLTEXT INDEXES YIELD name, properties "
+            "WHERE name = $name RETURN properties",
+            name=FULLTEXT_INDEX,
+        ).single()
+        if record and sorted(record["properties"]) != sorted(FULLTEXT_FIELDS):
+            session.run(f"DROP INDEX {FULLTEXT_INDEX} IF EXISTS").consume()
+    except Exception as exc:
+        print(f"[uam] index {FULLTEXT_INDEX} not checked: {exc}", file=sys.stderr)
 
 
 # --- formatting ---------------------------------------------------------------
@@ -485,7 +505,7 @@ OPTIONAL MATCH (o)-[:NEXT]->(next:Observation)
 OPTIONAL MATCH (o)-[:FROM_SESSION]->(s:Session)
 OPTIONAL MATCH (s)-[:HAS_SUMMARY]->(sum:SessionSummary)
 OPTIONAL MATCH (er:ExtractionRun {status: 'completed'})-[:PRODUCED]->(o)
-RETURN o {.id, .display_id, .type, .title, .facts, .narrative, .source_end} AS o,
+RETURN o {.id, .display_id, .type, .title, .narrative, .source_end} AS o,
        prev {.id, .display_id, .type, .title, .source_end} AS prev,
        next {.id, .display_id, .type, .title, .source_end} AS next,
        s {.session_id, .display_id, .user_id, .created_at} AS s,
@@ -498,7 +518,7 @@ EXPAND_SESSION = """
 MATCH (s:Session {session_id: $key})
 OPTIONAL MATCH (s)-[:HAS_SUMMARY]->(sum:SessionSummary)
 RETURN s {.session_id, .display_id, .user_id, .created_at} AS s,
-       sum {.headline, .request, .progress, .learned, .next_steps,
+       sum {.headline, .request, .progress, .outcome,
             .version, .source_end} AS sum,
        COUNT { (s)-[:HAS_EVENT]->() } AS event_count
 LIMIT 1
@@ -556,8 +576,7 @@ WINDOW_EVENTS_AFTER = _WINDOW_EVENTS.format(
 SUMMARY_FIELDS = (
     ("Request", "request"),
     ("Progress", "progress"),
-    ("Learned", "learned"),
-    ("Next steps", "next_steps"),
+    ("Outcome", "outcome"),
 )
 
 
@@ -565,9 +584,6 @@ def render_observation(data: dict, now: datetime | None = None) -> str:
     o, s, summary = data["o"], data.get("s"), data.get("sum")
     name = _ref(o.get("display_id"), o.get("id"))
     lines = [render_row(_observation_row(o), now)]
-    facts = [fact for fact in (o.get("facts") or []) if fact]
-    if facts:
-        lines += ["", "Facts:"] + [f"- {clip(fact, FIELD_CHARS)}" for fact in facts]
     if o.get("narrative"):
         lines += ["", "Narrative:", clip(o["narrative"], FIELD_CHARS)]
     context = []
@@ -749,7 +765,7 @@ def expand(
 RECAP_SESSIONS = 3
 RECAP_OBSERVATIONS = 5
 RELATED_ROWS = 3
-NEXT_STEPS_CHARS = 300
+OWN_PROGRESS_CHARS = 300
 RECALL_BLOCK_CHARS = 3000
 DELIVERY_BLOCK_CHARS = 8000
 
@@ -791,7 +807,7 @@ WITH s, sum ORDER BY sum.source_end DESC LIMIT $limit
 RETURN 'session' AS kind, s.display_id AS display_id, s.session_id AS ref,
        'session' AS type, sum.headline AS text, s.user_id AS user,
        sum.source_end AS source_end, sum.id AS key, sum.version AS version,
-       sum.next_steps AS next_steps
+       sum.progress AS progress
 """
 
 # Observations from one window share their source_end; the id, which ends
@@ -811,8 +827,7 @@ WITH node, score ORDER BY score DESC LIMIT $candidates
 OPTIONAL MATCH (s:Session)-[:HAS_SUMMARY]->(node)
 RETURN {ROW_FIELDS}, coalesce(node.version, 1) AS version, score,
        [text IN [node.title, node.narrative, node.headline, node.request,
-                 node.progress, node.learned, node.next_steps]
-                + coalesce(node.facts, [])
+                 node.progress, node.outcome]
         WHERE text IS NOT NULL] AS searchable
 ORDER BY score DESC
 """
@@ -1026,8 +1041,8 @@ def recap_rows(run, project: str, session_id: str, user: str | None) -> dict:
     Up to three other sessions of the project with a summary and up to five
     observations from other sessions, newest source first. The current
     user's own most recent other session is included even when it is not
-    among the newest, so their next steps can be shown; other people's
-    next steps stay inside their summaries.
+    among the newest, so where they left off can be shown; other people's
+    progress stays inside their summaries.
     """
     params = {"project": project, "session_id": session_id}
     sessions = run(RECAP_SUMMARIES, user=None, limit=RECAP_SESSIONS, **params)
@@ -1056,10 +1071,10 @@ def render_recap(
         lines.append("Recent sessions:")
         for row in sessions:
             lines.append("- " + render_row(row, now))
-            if own and row["key"] == own["key"] and own.get("next_steps"):
+            if own and row["key"] == own["key"] and own.get("progress"):
                 lines.append(
-                    "  Next steps you left there: "
-                    + clip(own["next_steps"], NEXT_STEPS_CHARS)
+                    "  Where you left off: "
+                    + clip(own["progress"], OWN_PROGRESS_CHARS)
                 )
     if observations:
         if sessions:

@@ -141,21 +141,19 @@ def model(monkeypatch):
     return install
 
 
-def observation(kind: str, title: str, facts=None, narrative=None, cites=None) -> dict:
+def observation(kind: str, title: str, narrative=None, cites=None) -> dict:
     return {
         "type": kind,
         "title": title,
-        "facts": facts or [f"{title}."],
         "narrative": narrative or f"The session reported: {title.lower()}.",
         "cites": cites or [],
     }
 
 
-def summary(headline: str, progress: str, next_steps: str, learned: str = "") -> dict:
+def summary(headline: str, progress: str, outcome: str = "") -> dict:
     return {
         "headline": headline,
         "request": "Investigate the apparent drop in customer renewals.",
         "progress": progress,
-        "learned": learned,
-        "next_steps": next_steps,
+        "outcome": outcome,
     }

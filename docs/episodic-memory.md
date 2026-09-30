@@ -64,8 +64,8 @@ extraction should "retain the originating memory references".
 | `Project` | `id`, `name` |
 | `Session` | `project_id`, `display_id` (`s41`), `context_generation`, `extraction_lease_owner`, `extraction_lease_until`; `user_id` becomes write-once |
 | `SessionEvent` | `prompt_id` and, on a failed tool call, `tool_error` ([3](#3-capture-changes)); on delivery events: `recall_block`, `recall_channel`, `recall_status` |
-| `Observation` | `id`, `display_id` (`o112`), `project_id`, `session_id`, `type`, `title`, `facts`, `narrative`, `source_start`, `source_end`, `created_at`, `embedding` |
-| `SessionSummary` | `id`, `session_id`, `project_id`, `version`, `headline`, `request`, `progress`, `learned`, `next_steps`, `source_start`, `source_end`, `created_at`, `updated_at`, `embedding` |
+| `Observation` | `id`, `display_id` (`o112`), `project_id`, `session_id`, `type`, `title`, `narrative`, `source_start`, `source_end`, `created_at`, `embedding` |
+| `SessionSummary` | `id`, `session_id`, `project_id`, `version`, `headline`, `request`, `progress`, `outcome`, `source_start`, `source_end`, `created_at`, `updated_at`, `embedding` |
 | `ExtractionRun` | `id`, `status`, `session_id`, `window_key`, `llm_model`, `event_count`, `created_at`, `input_summary_version`, `input_summary_json`, `output_summary_version`, `output_summary_json`, `input_excerpts_json`, `input_chars`, `input_trim_json`, `error`, `overflow` |
 
 Neo4j cannot constrain relationship counts, so the writer maintains them:
@@ -248,7 +248,7 @@ extraction prompt, and keeps every rule in it:
 
 - Extract new developments only, with at most three observations, each
   using one of the seven types.
-- State only facts the record supports, and preserve identifiers.
+- State only what the record supports, and preserve identifiers.
 - Set `overflow` when more than three developments need observations.
 - Carry the summary forward.
 - Include routine work, and return no observations when the messages
@@ -264,8 +264,7 @@ whose claim it restates.
 The writer, not the model, decides what is stored:
 
 - `type` is one of the seven values. `title` is one line of at most 120
-  characters. `facts` holds 1–6 strings of at most 300 characters each.
-  `narrative` is at most 1,500 characters. At most three observations are
+  characters. `narrative` is at most 1,500 characters. At most three observations are
   kept.
 - The summary's `headline` is at most 120 characters, and each of its
   other four fields at most 1,500. `null`, or a copy of the previous
@@ -377,9 +376,9 @@ hook.
   other sessions, newest `source_end` first in both cases; observations
   from one window keep the order they were written in. Only records
   extraction wrote (those with a display id) are shown. For the current
-  user's most recent other session, it adds that summary's `next_steps`
+  user's most recent other session, it adds that summary's `progress`
   as an indented line, and includes that session even when it is not among
-  the three newest. Other people's next steps stay inside their summaries.
+  the three newest. Other people's progress stays inside their summaries.
 - **Block.** The block uses the row format from
   [6.2](#62-display-ids-and-rows), and is bounded at 3,000 characters.
   Claude Code caps each hook's `additionalContext` at 10,000 characters,
@@ -407,7 +406,7 @@ A returning user's own session gets one more line under its row:
 
 ```
 - #s40 · session · 3 h ago · maria@company.com · Historical report check started
-  Next steps you left there: Rerun the two reports that failed the check.
+  Where you left off: Checked the reports; two failed and need a rerun.
 ```
 
 An empty project gets no block.
@@ -570,7 +569,7 @@ The signature follows the chapter:
 
 The signature is `expand(id, events=False, cursor=None)`.
 
-- **An observation** returns its type, age, title, facts, and narrative.
+- **An observation** returns its type, age, title, and narrative.
   It adds rows for its predecessor and successor on the project timeline
   and for its source session (owner and headline), and it names the run
   window it came from.
@@ -596,9 +595,9 @@ bounds:
 - Start from the overview: recap rows and `search` results. Expand only
   ids that look relevant. Open source events only when an important
   detail, such as what was run or what was reported, is uncertain.
-- Treat recalled items as history. `next_steps` is someone's unfinished
-  work, not an assignment, and `learned` is a session's report, not an
-  approved rule.
+- Treat recalled items as history. Remaining work in `progress` is
+  someone's unfinished work, not an assignment, and `outcome` is a
+  session's report, not an approved rule.
 - Before reusing an earlier case, compare the metric, the pipeline, the
   dates, the attempted action, and the evidence for its outcome. A similar
   title is not enough.
@@ -660,7 +659,7 @@ UAM_TEST_DATABASE=uamtest uv run --with pytest --with neo4j pytest tests
 
 1. A fresh session by the second user gets a recap that names the first
    user's session and its `#s` id.
-2. Expanding that id shows the unfinished work in `next_steps`.
+2. Expanding that id shows the unfinished work in `progress`.
 3. Expanding the discovery observation leads to the first user's session
    and, with `events`, to the events its run processed.
 4. Finishing the work in the first session adds an observation, raises
@@ -741,10 +740,19 @@ delivered blocks are on their events.
    plugin's embeddings too. Capture now MERGEs `User` and `Project` anchors
    and consolidation writes `Observation` nodes, so point `NEO4J_DATABASE`
    at a database dedicated to memory before enabling the hooks.
-8. **Fulltext over `facts`. Resolved for Neo4j 2026.08.** `facts` is a
-   list. On 2026.08 the fulltext index covers it: a word that appears only
-   in an observation's facts finds it. An older Neo4j that does not index
-   `LIST<STRING>` would need a joined `facts_text` as well.
+8. **No `facts`, and `outcome` for `learned`. Changed with the chapter.**
+   Observations hold `type`, `title`, and `narrative` only. Extracting
+   facts and learnings is a separate job in chapter 4, with its own
+   prompt, so each call stays small enough for a cheaper model and the
+   jobs can run concurrently. The summary's `learned` is now `outcome`,
+   so it is not mistaken for a chapter 4 learning, and `next_steps` is
+   gone: `progress` says what is done and what remains.
+   `ensure_retrieval_indexes` drops and rebuilds `episode_text` when its
+   fields differ. Nodes written before the change keep their old
+   properties; to carry existing summaries over, run once:
+   `MATCH (s:SessionSummary) WHERE s.learned IS NOT NULL
+   SET s.outcome = coalesce(s.outcome, s.learned) REMOVE s.learned`.
+   Old summaries keep a `next_steps` property that nothing reads.
 9. **A failed call's reason. Fixed in capture.** Chapter 2's capture read
    `tool_error` from `PostToolUseFailure`, but Claude Code sends the reason
    as `error` (checked in Claude Code 2.1.268; the hooks reference shows
