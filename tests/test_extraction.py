@@ -65,7 +65,9 @@ def test_a_turn_becomes_observations_and_a_summary(graph, model):
     system, user = (m["content"] for m in scripted.calls[0])
     assert "Write up to 3 observations" in system
     assert "Project: renewal-analysis\nSession owner: maria@company.com" in user
-    assert CLOSING in user and "psql -f renewals.sql" in user
+    assert "Messages in the completed work window:" in user
+    assert "Investigate the apparent drop in customer renewals." in user
+    assert CLOSING in user and "psql -f renewals.sql" not in user  # tool calls stay unread
     assert user.endswith("Previous session summary:\nnone yet")
 
     rows = graph.rows(
@@ -107,8 +109,10 @@ def test_a_turn_becomes_observations_and_a_summary(graph, model):
         "COUNT { (r)-[:PRODUCED]->() } AS produced"
     )
     assert len(run) == 1
-    # SessionStart, the prompt, two Pre/Post pairs, and the Stop. The side
-    # agent's SubagentStop comes after the Stop, so it waits for the next window.
+    # SessionStart, the prompt, two Pre/Post pairs, and the Stop: the run
+    # marks the whole window processed, though the model read two messages.
+    # The side agent's SubagentStop comes after the Stop, so it waits for the
+    # next window.
     assert run[0]["events"] == run[0]["processed"] == 7
     assert run[0]["produced"] == 2 and run[0]["version"] == 1
     assert run[0]["input"] is None  # no summary before: no snapshot

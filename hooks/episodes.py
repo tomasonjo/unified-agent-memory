@@ -579,8 +579,9 @@ def render_observation(data: dict, now: datetime | None = None) -> str:
     produced_by = data.get("run") or {}
     if produced_by.get("event_count"):
         context.append(
-            f"Evidence: {produced_by['event_count']} captured events went into this "
-            f'account; expand("{name}", events=true) opens them.'
+            f"Evidence: written from the prompts and closing messages among "
+            f"{produced_by['event_count']} captured events; "
+            f'expand("{name}", events=true) opens them.'
         )
     if context:
         lines += [""] + context

@@ -31,14 +31,15 @@ def big_turn(calls: int) -> list[dict]:
     return events
 
 
-def test_prompt_and_closing_message_stay_whole_under_budget():
+def test_only_the_prompt_and_closing_message_reach_the_model():
     events = big_turn(400)
     rendered = em.render_window(events, 24_000)
-    assert rendered is not None
-    assert len(rendered.text) <= 24_000
-    assert "P" * 8000 in rendered.text and "C" * 8000 in rendered.text
-    assert rendered.trim["message_cap"] is None
-    assert rendered.tool_calls == 400
+    assert rendered is not None and rendered.messages == 2
+    assert rendered.text == (
+        "[--:--:--] User prompt:\n" + "P" * 8000
+        + "\n[--:--:--] Assistant closing message:\n" + "C" * 8000
+    )
+    assert rendered.message_cap is None
 
 
 def test_whole_input_stays_within_thirty_thousand_characters():
@@ -52,36 +53,18 @@ def test_whole_input_stays_within_thirty_thousand_characters():
     assert total <= em.INPUT_CHARS
 
 
-def test_tools_step_down_read_only_first():
-    events = big_turn(30)
-    full = em.render_window(events, 10**6)
-    assert full.trim["read_only_tools"] == "input_1000"
-    squeezed = em.render_window(events, len(full.text) - 2000)
-    assert squeezed.trim["read_only_tools"] != "input_1000"
-    assert squeezed.trim["action_tools"] == "input_1000"
-
-
-def test_collapsed_calls_name_their_first_targets():
-    events = [event("UserPromptSubmit", 0, prompt="go")]
-    for i in range(12):
-        events.append(event("PostToolUse", i + 1, tool_name="Read", tool_use_id=f"t{i}",
-                            tool_input=json.dumps({"file_path": f"f{i}.py"})))
-    text = em.render_items(em.window_items(events), (em.COLLAPSED, em.COLLAPSED), None)
-    assert "Tool Read ×12: f0.py, f1.py, … +10" in text
-
-
 def test_messages_are_cut_only_to_their_floor():
     events = [
         event("UserPromptSubmit", 0, prompt="A" * 8000),
         event("Stop", 1, last_assistant_message="B" * 8000),
     ]
     rendered = em.render_window(events, 6000)
-    assert rendered is not None and rendered.trim["message_cap"] >= em.MESSAGE_FLOOR
+    assert rendered is not None and rendered.message_cap >= em.MESSAGE_FLOOR
     assert "characters omitted" in rendered.text
     assert em.render_window(events, 2000) is None
 
 
-def test_side_agent_and_bookkeeping_never_reach_the_model():
+def test_tools_subagents_and_bookkeeping_never_reach_the_model():
     events = [
         event("SessionStart", 0, source="startup"),
         event("UserPromptSubmit", 1, prompt="Fix the query"),
@@ -89,48 +72,34 @@ def test_side_agent_and_bookkeeping_never_reach_the_model():
               tool_input=json.dumps({"command": "psql -f fix.sql"})),
         event("PostToolUse", 3, tool_name="Bash", tool_use_id="t1",
               tool_input=json.dumps({"command": "psql -f fix.sql"})),
-        event("PreToolUse", 4, tool_name="Bash", tool_use_id="t2",
-              tool_input=json.dumps({"command": "rm -rf build"})),
-        event("PostToolUseFailure", 5, tool_name="Bash", tool_use_id="t3",
+        event("PostToolUseFailure", 4, tool_name="Bash", tool_use_id="t2",
               tool_input=json.dumps({"command": "pytest"}), tool_error="exit code 1"),
-        event("SubagentStart", 6, agent_type="Explore", agent_id="a-explore"),
-        event("SubagentStop", 7, agent_type="Explore", agent_id="a-explore",
+        event("SubagentStart", 5, agent_type="Explore", agent_id="a-explore"),
+        event("SubagentStop", 6, agent_type="Explore", agent_id="a-explore",
               last_assistant_message="Found 3 files"),
+        event("PreCompact", 7),
         event("Stop", 8, last_assistant_message="Query corrected."),
-        # The harness's own agents: no SubagentStart, whatever their type.
+        # The harness's own prompt-suggestion agent.
         event("SubagentStop", 9, agent_type="", agent_id="a-suggest",
               last_assistant_message="yes, ship it"),
-        event("SubagentStop", 10, agent_type="reviewer", agent_id="a-suggest-2",
-              last_assistant_message="now open a PR"),
-        event("Notification", 11),
-    ]
-    text = em.render_window(events, 10**6).text
-    assert "yes, ship it" not in text
-    assert "now open a PR" not in text  # a session run with --agent reviewer
-    assert "Subagent Explore started" in text
-    assert "Subagent Explore final message:\nFound 3 files" in text
-    assert text.count("psql -f fix.sql") == 1  # PreToolUse skipped once a result followed
-    assert "(no result recorded)" in text and "rm -rf build" in text
-    assert "(failed)" in text and "error: exit code 1" in text
-    assert "startup" not in text
-
-
-def test_a_subagent_started_in_an_earlier_window_still_reports():
-    events = [event("SubagentStop", 0, agent_type="general-purpose", agent_id="a-bg",
-                    last_assistant_message="Background review done"),
-              event("Stop", 1, last_assistant_message="ok")]
-    assert "Background review done" not in em.render_window(events, 10**6).text
-    text = em.render_window(events, 10**6, spawned={"a-bg"}).text
-    assert "Subagent general-purpose final message:\nBackground review done" in text
-
-
-def test_lifecycle_only_window_renders_nothing():
-    events = [
-        event("SubagentStop", 0, agent_type="", last_assistant_message="continue"),
-        event("SessionEnd", 1),
+        event("Notification", 10),
     ]
     rendered = em.render_window(events, 10**6)
-    assert rendered.messages == 0 and rendered.tool_calls == 0
+    assert rendered.text == (
+        "[--:--:--] User prompt:\nFix the query\n"
+        "[--:--:--] Assistant closing message:\nQuery corrected."
+    )
+
+
+def test_a_window_without_messages_renders_nothing():
+    events = [
+        event("PostToolUse", 0, tool_name="Read", tool_use_id="t1",
+              tool_input=json.dumps({"file_path": "a.py"})),
+        event("SubagentStop", 1, agent_type="", last_assistant_message="continue"),
+        event("SessionEnd", 2),
+    ]
+    rendered = em.render_window(events, 10**6)
+    assert rendered.messages == 0 and rendered.text == ""
 
 
 def test_split_prefers_the_turn_boundary():

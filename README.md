@@ -197,11 +197,11 @@ provenance:
 (:ExtractionRun)-[:PRODUCED]->(:Observation)
 ```
 
-The input stays within 30,000 characters: prompts and closing messages
-first, tool calls stepped down from their input to a path or command to a
-count, and never a tool's output. A per-session lease keeps two workers
-apart, a failed or invalid call leaves the window for the next try, and a
-completed window is never processed twice. On `SessionStart` (startup) the
+The model reads only the window's user prompts and assistant closing
+messages, within 30,000 characters; tool calls stay in the captured
+record, unread. A per-session lease keeps two workers apart, a failed or
+invalid call leaves the window for the next try, and a completed window is
+never processed twice. On `SessionStart` (startup) the
 same script sweeps up windows an interrupted worker left behind. Each
 window's outcome goes to `~/.unified-agent-memory/logs/extract.log`, and
 `extract_memory.py --session ID` consolidates a session by hand.
