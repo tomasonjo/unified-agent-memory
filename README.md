@@ -133,11 +133,15 @@ two parallel hook configs collapses to one node. Two storage decisions
 shape the record. Tool results are not stored: they are the bulk of a
 session and regenerable, so the record keeps only that the tool ran, what
 it was asked, and how many characters came back (`tool_response_chars`).
-Inputs are stored: prompts, tool inputs, and closing messages (bounded at
-8,000 characters), a failed call's reason (1,000), and what the injection
+Inputs are stored: prompts, tool inputs, and the assistant's text (each
+bounded at 8,000 characters), a failed call's reason (1,000), and what the injection
 hook injected, recorded on the `SessionStart` event itself (`prompt_name`,
 `prompt_source`, `prompt_version`, and the full `prompt_content`), so a
-session can be reproduced from its record.
+session can be reproduced from its record. The assistant's text arrives
+two ways: each `Stop` carries the turn's closing message, and
+`MessageDisplay` carries what is shown as a message streams, including
+the text between tool calls, one event per batch of lines (`message_id`,
+`index`, `final`, `delta`).
 Injection is not a lifecycle event, so nothing invented enters the chain:
 the injection hook appends the same `SessionStart` event the capture hook
 does, the shared content hash collapses the two writes into one node, and
@@ -197,9 +201,10 @@ provenance:
 (:ExtractionRun)-[:PRODUCED]->(:Observation)
 ```
 
-The model reads only the window's user prompts and assistant closing
-messages, within 30,000 characters; tool calls stay in the captured
-record, unread. A per-session lease keeps two workers apart, a failed or
+The model reads only the window's messages, within 30,000 characters:
+the user's prompts, what the assistant wrote during each turn
+(reassembled from its `MessageDisplay` flushes), and each turn's closing
+message, read once; tool calls stay in the captured record, unread. A per-session lease keeps two workers apart, a failed or
 invalid call leaves the window for the next try, and a completed window is
 never processed twice. On `SessionStart` (startup) the
 same script sweeps up windows an interrupted worker left behind. Each

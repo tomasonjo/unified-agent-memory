@@ -83,6 +83,20 @@ def capture(session_id: str, event_name: str, **fields) -> str:
     return common.append_session_event(session_id, event_name, build_event_props(payload))
 
 
+def flushes(prompt_id: str, text: str) -> list[dict]:
+    """A displayed message as MessageDisplay delivers it: one line per flush.
+
+    Each item is the payload of one flush, for ``capture(..., "MessageDisplay", **item)``.
+    """
+    message_id = str(uuid.uuid4())
+    lines = text.splitlines(keepends=True)
+    return [
+        {"prompt_id": prompt_id, "message_id": message_id, "index": index,
+         "final": index == len(lines) - 1, "delta": line}
+        for index, line in enumerate(lines)
+    ]
+
+
 def turn(
     session_id: str,
     prompt: str,

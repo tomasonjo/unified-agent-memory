@@ -107,6 +107,16 @@
         ]
       }
     ],
+    "MessageDisplay": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\""
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

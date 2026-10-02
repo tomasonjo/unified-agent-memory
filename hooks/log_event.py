@@ -6,8 +6,8 @@
 """Hook: capture every Claude Code lifecycle event to Neo4j.
 
 Wired in hooks/hooks.json for SessionStart, UserPromptSubmit, PreToolUse,
-PostToolUse, PostToolUseFailure, Notification, Stop, SubagentStart,
-SubagentStop, PreCompact, and SessionEnd. Reads the hook payload from stdin
+PostToolUse, PostToolUseFailure, Notification, MessageDisplay, Stop,
+SubagentStart, SubagentStop, PreCompact, and SessionEnd. Reads the hook payload from stdin
 and appends one :SessionEvent to the per-session chain, the same episodic
 shape the meta-knowledge-graph sister project uses::
 
@@ -22,6 +22,15 @@ Storage decisions:
 - Inputs are stored: prompts and tool inputs (bounded at 8,000 chars), and
   the injection hook records what it injected on the SessionStart event,
   so a session can be reproduced from its record.
+- The assistant's text is stored, including what it writes between tool
+  calls, which no other event carries. ``MessageDisplay`` fires with each
+  batch of newly completed lines while a message streams (once per
+  message, with the whole text, outside the interactive terminal). Each
+  batch becomes one event with its ``message_id``, its ``index`` within
+  the message, ``final`` on the last one, and the lines as ``delta``;
+  consolidation reassembles the messages. The hook sits in the display
+  path, since the terminal waits for it before showing those lines, and
+  it prints nothing, so the original text is shown.
 - Every :Session and :SessionEvent is stamped with a ``user_id`` (an email
   address, resolved from ``UAM_USER_ID``, then the harness's logged-in
   account, then the machine's git configuration), so sessions have owners
@@ -59,7 +68,7 @@ if str(HOOK_DIR) not in sys.path:
 from common import append_session_event, in_llm_subprocess, load_env  # noqa: E402
 
 MAX_FIELD_CHARS = 8000
-TRUNCATED_FIELDS = ("tool_input", "prompt", "last_assistant_message")
+TRUNCATED_FIELDS = ("tool_input", "prompt", "last_assistant_message", "delta")
 # A failed call's reason, which is not its result: enough to say why it
 # failed, never the output of a command that printed before failing.
 MAX_ERROR_CHARS = 1000
@@ -74,6 +83,14 @@ def _truncate(value, limit: int = MAX_FIELD_CHARS) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"...[truncated {len(text) - limit} chars]"
+
+
+def _displayed_lines(data: dict):
+    """The text a MessageDisplay flush added. Claude Code 2.1 sends it as
+    ``delta``; the hooks reference documents it as ``content``."""
+    if data.get("hook_event_name") != "MessageDisplay":
+        return None
+    return data["delta"] if "delta" in data else data.get("content")
 
 
 def build_event_props(data: dict) -> dict:
@@ -96,6 +113,12 @@ def build_event_props(data: dict) -> dict:
         "tool_error": data.get("tool_error") or data.get("error"),
         "is_interrupt": data.get("is_interrupt"),
         "last_assistant_message": data.get("last_assistant_message"),
+        # MessageDisplay: one flush of a streaming assistant message.
+        "turn_id": data.get("turn_id"),
+        "message_id": data.get("message_id"),
+        "index": data.get("index"),
+        "final": data.get("final"),
+        "delta": _displayed_lines(data),
         "stop_hook_active": data.get("stop_hook_active"),
         "agent_id": data.get("agent_id"),
         "agent_type": data.get("agent_type"),

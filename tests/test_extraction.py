@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 
 import pytest
 
@@ -20,6 +21,7 @@ from conftest import (
     ROOT,
     TEST_DATABASE,
     capture,
+    flushes,
     observation,
     summary,
     turn,
@@ -170,6 +172,58 @@ def test_the_next_turn_adds_an_observation_and_a_summary_version(graph, model):
     assert second["out"] == 2
     assert json.loads(second["input"])["progress"].endswith("are not yet checked.")
     assert json.loads(second["output"])["progress"] == "Corrected the query and reran two reports."
+
+
+def test_what_the_assistant_said_during_a_turn_reaches_the_model(graph, model):
+    capture("s-maria", "SessionStart", source="startup")
+    prompt_id = uuid.uuid4().hex
+    capture("s-maria", "UserPromptSubmit", prompt_id=prompt_id,
+            prompt="Investigate the apparent drop in customer renewals.")
+    for flush in flushes(prompt_id, "Checking the renewal query first.\n"):
+        capture("s-maria", "MessageDisplay", **flush)
+    capture("s-maria", "PreToolUse", tool_name="Bash", tool_use_id="toolu_1",
+            tool_input={"command": "psql -f renewals.sql"}, prompt_id=prompt_id)
+    capture("s-maria", "PostToolUse", tool_name="Bash", tool_use_id="toolu_1",
+            tool_input={"command": "psql -f renewals.sql"}, tool_response="ok",
+            prompt_id=prompt_id)
+    said = ("The March 3 change reclassified reactivated contracts.\n"
+            "Correcting the dashboard query.\n")
+    for flush in flushes(prompt_id, said):
+        capture("s-maria", "MessageDisplay", **flush)
+    closing = ("I corrected the dashboard query.\n"
+               "Analytics confirmed the fix on the March numbers.")
+    first_line, last_line = flushes(prompt_id, closing)
+    capture("s-maria", "MessageDisplay", **first_line)
+    capture("s-maria", "Stop", last_assistant_message=closing, stop_hook_active=False,
+            prompt_id=prompt_id)
+    capture("s-maria", "MessageDisplay", **last_line)  # lands after its Stop
+
+    scripted = model(FIRST_PASS)
+    em.consolidate(["s-maria"])
+    user = scripted.calls[0][1]["content"]
+    assert "Assistant message:\nChecking the renewal query first." in user
+    assert "Assistant message:\n" + said.strip() in user
+    assert "Assistant closing message:\n" + closing in user
+    assert user.count("I corrected the dashboard query.") == 1  # its displayed copy is dropped
+    assert "psql -f renewals.sql" not in user
+
+    # The closing message's last line is in the next window, and stays unread.
+    turn("s-maria", "Check the historical reports.", [], "Two reports needed a rerun.")
+    scripted = model({
+        "observations": [observation("change", "Historical renewal reports rerun")],
+        "summary": summary("Renewal drop explained; history checked",
+                           "Corrected the query and reran two reports."),
+        "overflow": False,
+    })
+    em.consolidate(["s-maria"])
+    user = scripted.calls[0][1]["content"]
+    assert "Two reports needed a rerun." in user
+    assert "Analytics confirmed the fix" not in user
+    assert graph.value(
+        "MATCH (:ExtractionRun {status: 'completed'})-[:PROCESSED_EVENT]->"
+        "(e:SessionEvent {event_name: 'MessageDisplay', message_id: $m}) "
+        "RETURN count(e)", m=last_line["message_id"]
+    ) == 2  # both lines processed, one per window
 
 
 def test_a_failed_call_leaves_the_window_eligible(graph, model):

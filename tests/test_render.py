@@ -172,3 +172,91 @@ def test_an_unchanged_summary_is_not_rewritten():
     previous = dict(GOOD["summary"])
     assert em.validate(GOOD, previous, 3, set()).summary is None
     assert em.validate({"observations": [], "summary": None}, previous, 3, set()).summary is None
+
+
+# --- what the assistant wrote during a turn ----------------------------------
+
+
+def shown(position: int, message_id: str, part: int, delta: str, prompt_id="p1", **fields) -> dict:
+    """One MessageDisplay flush: ``part`` is its index within the message."""
+    return {**event("MessageDisplay", position, prompt_id=prompt_id,
+                    message_id=message_id, delta=delta, **fields), "index": part}
+
+
+def test_displayed_messages_are_reassembled_from_their_flushes():
+    events = [
+        event("UserPromptSubmit", 0, prompt="Why did renewals drop?", prompt_id="p1"),
+        # Parallel hooks can land a message's flushes out of order.
+        shown(1, "m1", 1, "Then the pipeline log.\n"),
+        shown(2, "m1", 0, "Checking the renewal query first.\n"),
+        event("PreToolUse", 3, tool_name="Bash", tool_input="psql -f renewals.sql"),
+        event("PostToolUse", 4, tool_name="Bash", tool_input="psql -f renewals.sql"),
+        shown(5, "m2", 0, "The March 3 change reclassified reactivated contracts.\n"),
+        event("Stop", 6, prompt_id="p1", last_assistant_message="Query corrected."),
+    ]
+    rendered = em.render_window(events, 10**6)
+    assert rendered.text == (
+        "[--:--:--] User prompt:\nWhy did renewals drop?\n"
+        "[--:--:--] Assistant message:\n"
+        "Checking the renewal query first.\nThen the pipeline log.\n"
+        "[--:--:--] Assistant message:\n"
+        "The March 3 change reclassified reactivated contracts.\n"
+        "[--:--:--] Assistant closing message:\nQuery corrected."
+    )
+
+
+def test_the_closing_message_is_read_once():
+    closing = "Query corrected.\nAnalytics confirmed the fix."
+    events = [
+        event("UserPromptSubmit", 0, prompt="Fix the query", prompt_id="p1"),
+        shown(1, "m1", 0, "Query corrected.\n"),
+        shown(2, "m1", 1, "Analytics confirmed the fix.", final=True),
+        event("Stop", 3, prompt_id="p1", last_assistant_message=closing),
+    ]
+    rendered = em.render_window(events, 10**6)
+    assert rendered.messages == 2
+    assert rendered.text.count("Analytics confirmed the fix.") == 1
+    assert "Assistant message" not in rendered.text
+
+
+def test_closing_lines_that_land_after_their_stop_are_dropped():
+    # The previous turn's Stop is outside this window; the worker passes
+    # its closing message along as turn_closings.
+    earlier = ["Query corrected.\nAnalytics confirmed the fix."]
+    events = [
+        shown(0, "m1", 1, "Analytics confirmed the fix.", prompt_id="p0",
+              final=True, turn_closings=earlier),
+        event("SessionEnd", 1),
+    ]
+    rendered = em.render_window(events, 10**6)
+    assert rendered.messages == 0 and rendered.text == ""
+
+
+def test_an_interrupted_turn_keeps_what_the_assistant_said():
+    events = [
+        event("UserPromptSubmit", 0, prompt="Why did renewals drop?", prompt_id="p1"),
+        shown(1, "m1", 0, "The March 3 change reclassified reactivated contracts.\n"),
+        event("PreToolUse", 2, tool_name="Edit", tool_input="dashboards/renewals.sql"),
+        # Interrupted: no Stop. The next turn closes the window.
+        event("UserPromptSubmit", 3, prompt="Stop, summarize instead.", prompt_id="p2"),
+        event("Stop", 4, prompt_id="p2", last_assistant_message="Summary sent."),
+    ]
+    rendered = em.render_window(events, 10**6)
+    assert "Assistant message:\nThe March 3 change" in rendered.text
+    assert rendered.messages == 4
+
+
+def test_capture_keeps_the_displayed_lines():
+    from log_event import build_event_props
+
+    flush = {"hook_event_name": "MessageDisplay", "turn_id": "t1", "message_id": "m1",
+             "index": 0, "final": False, "delta": "Checking the query.\n"}
+    props = build_event_props(flush)
+    assert props["delta"] == "Checking the query.\n"
+    assert (props["message_id"], props["index"], props["final"]) == ("m1", 0, False)
+    # The hooks reference names the field content.
+    documented = {"hook_event_name": "MessageDisplay", "content": "Checking the query."}
+    assert build_event_props(documented)["delta"] == "Checking the query."
+    # Other events' content is not displayed text.
+    elicitation = {"hook_event_name": "ElicitationResult", "content": {"answer": "yes"}}
+    assert "delta" not in build_event_props(elicitation)

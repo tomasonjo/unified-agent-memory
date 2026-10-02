@@ -545,7 +545,7 @@ RETURN e.event_id AS event_id
 """
 
 EVENT_FIELDS = """e {.event_id, .event_name, .timestamp, .tool_name, .prompt,
-          .tool_input, .tool_error, .last_assistant_message, .agent_type,
+          .tool_input, .tool_error, .last_assistant_message, .delta, .agent_type,
           .source, .prompt_name, .recall_channel} AS e,
        e.recall_block IS NOT NULL AS delivered"""
 
@@ -595,7 +595,7 @@ def render_observation(data: dict, now: datetime | None = None) -> str:
     produced_by = data.get("run") or {}
     if produced_by.get("event_count"):
         context.append(
-            f"Evidence: written from the prompts and closing messages among "
+            f"Evidence: written from the prompts and assistant messages among "
             f"{produced_by['event_count']} captured events; "
             f'expand("{name}", events=true) opens them.'
         )
@@ -644,6 +644,7 @@ def render_event(e: dict, delivered: bool) -> str:
         "UserPromptSubmit": e.get("prompt"),
         "PostToolUse": e.get("tool_input"),
         "PostToolUseFailure": e.get("tool_error") or e.get("tool_input"),
+        "MessageDisplay": e.get("delta"),
         "Stop": e.get("last_assistant_message"),
         "SubagentStop": e.get("last_assistant_message"),
         "SubagentStart": e.get("agent_type"),
