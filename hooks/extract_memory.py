@@ -13,9 +13,9 @@ response path; ``SessionEnd`` hooks share a budget of a second and a half.
 The worker reads a *committed event window* from the graph and makes one
 call to the background model (``hooks/llm.py``) that returns up to three
 observations and the session's updated rolling summary. The model reads
-only the window's messages: the user's prompts, what the assistant wrote
-during each turn, and each turn's closing message; tool calls stay in the
-captured record, unread. The worker validates what comes back,
+only the window's messages: the user's prompts and the agent's
+intermediate and final responses; tool calls stay in the captured record,
+unread. The worker validates what comes back,
 and one transaction writes the episodes together with their processing
 markers::
 
@@ -83,7 +83,7 @@ from common import (  # noqa: E402
 )
 
 CLOSING_EVENTS = ("Stop", "SessionEnd")
-# One flush of a streaming assistant message; see hooks/log_event.py.
+# One flush of a response streaming to the screen; see hooks/log_event.py.
 DISPLAY_EVENT = "MessageDisplay"
 LEASE_SECONDS = 600
 MAX_FAILURES = 3
@@ -93,7 +93,7 @@ MAX_FAILURES = 3
 # needed.
 INPUT_CHARS = 30_000
 MESSAGE_FLOOR = 1_500
-# A reassembled displayed message, like every message capture stores.
+# A reassembled intermediate response, like every message capture stores.
 MESSAGE_CHARS = 8_000
 TRUNCATION_MARKER = re.compile(r"\.\.\.\[truncated \d+ chars\]")
 OPENING_EXCERPT_CHARS = 1_000
@@ -150,10 +150,10 @@ unchanged, or null when there is no previous summary.
 
 Include routine work when the messages describe work performed.
 Return no observations when they describe no work.
-The window holds the user's prompts and the assistant's messages, not
-the tool calls or their output. An assistant message is written during
-a turn, between tool calls, and often announces the next step: an
-announced step is an attempt, not an outcome. The closing message ends
+The window holds the user's prompts and the agent's responses, not the
+tool calls or their output. An intermediate response is written during a
+turn, between tool calls, and often announces the next step: an
+announced step is an attempt, not an outcome. The final response ends
 the turn. Attribute reported outcomes to whoever reported them; state
 when an outcome is unknown.
 Attribute repeated recalled claims to their originating memory; do not
@@ -216,10 +216,10 @@ RETURN e {.event_id, .event_name, .timestamp, .prompt, .prompt_id,
           .last_assistant_message, .message_id, .index, .delta} AS e
 """
 
-# The closing messages of the turns a window's displayed messages belong
-# to, from the whole session: a closing message's last lines can reach the
+# The final responses of the turns a window's displayed responses belong
+# to, from the whole session: a final response's last lines can reach the
 # graph after its Stop, in the next window.
-TURN_CLOSINGS = """
+FINAL_RESPONSES = """
 MATCH (:Session {session_id: $session_id})-[:HAS_EVENT]->(e:SessionEvent)
 WHERE e.event_name = 'Stop' AND e.prompt_id IN $prompt_ids
   AND e.last_assistant_message IS NOT NULL
@@ -461,22 +461,23 @@ def _comparable(text: str) -> str:
     return " ".join(TRUNCATION_MARKER.sub("", text).split())
 
 
-def _repeats(text: str, closings: list[str]) -> bool:
-    """True when ``text`` is (part of) one of its turn's closing messages."""
+def _repeats(text: str, finals: list[str]) -> bool:
+    """True when ``text`` is (part of) one of its turn's final responses."""
     shown = _comparable(text)
-    for closing in closings:
-        closing = _comparable(closing)
-        if closing and (shown in closing or closing in shown):
+    for final in finals:
+        final = _comparable(final)
+        if final and (shown in final or final in shown):
             return True
     return False
 
 
 def window_messages(events: list[dict]) -> list[Message]:
-    """The window's user prompts and assistant messages, in order.
+    """The window's user prompts and the agent's responses, in order.
 
-    The model reads nothing else. A turn's closing message reports what the
-    turn did and how it ended, and what the assistant wrote between tool
-    calls says what it was doing and noticed on the way. The tool calls
+    The model reads nothing else. A turn's final response reports what the
+    turn did and how it ended, and its intermediate responses, written
+    between tool calls, say what the agent was doing and noticed on the
+    way. The tool calls
     themselves show only what was attempted, since capture keeps no tool
     output, and in a long turn they are most of the window. So tool calls,
     subagent reports (which reach the session as tool results), lifecycle
@@ -485,17 +486,17 @@ def window_messages(events: list[dict]) -> list[Message]:
     the harness's own agents, whose "final message" is a guess at the
     user's next prompt ("yes, commit it").
 
-    Displayed messages are reassembled from their MessageDisplay flushes by
-    ``message_id`` and ``index``, since parallel hooks can land flushes out
-    of order. The closing message is displayed too; its Stop copy is the
-    one kept, so a displayed message that repeats its turn's closing
-    message is dropped. ``turn_closings``, set by the worker, carries those
-    closing messages from outside the window.
+    Displayed responses are reassembled from their MessageDisplay flushes
+    by ``message_id`` and ``index``, since parallel hooks can land flushes
+    out of order. The final response is displayed too; its Stop copy is the
+    one kept, so a displayed response that repeats its turn's final
+    response is dropped. ``final_responses``, set by the worker, carries
+    those final responses from outside the window.
     """
-    closings: dict = {}
+    finals: dict = {}
     for e in events:
         if e.get("event_name") == "Stop" and e.get("last_assistant_message"):
-            closings.setdefault(e.get("prompt_id"), []).append(e["last_assistant_message"])
+            finals.setdefault(e.get("prompt_id"), []).append(e["last_assistant_message"])
     displayed: dict = {}
     entries = []
     for position, e in enumerate(events):
@@ -504,28 +505,29 @@ def window_messages(events: list[dict]) -> list[Message]:
             key = e.get("message_id") or e["event_id"]
             if key not in displayed:
                 displayed[key] = {"position": position, "event": e, "flushes": [],
-                                  "closings": list(e.get("turn_closings") or [])}
+                                  "finals": list(e.get("final_responses") or [])}
             displayed[key]["flushes"].append((e.get("index") or 0, e.get("delta") or ""))
             continue
         if name == "UserPromptSubmit" and e.get("prompt"):
             label, text = "User prompt", e["prompt"]
         elif name == "Stop" and e.get("last_assistant_message"):
-            label, text = "Assistant closing message", e["last_assistant_message"]
+            label, text = "Agent final response", e["last_assistant_message"]
         else:
             continue
         entries.append((position, Message(_time(e.get("timestamp")), label, str(text))))
-    for message in displayed.values():
-        first = message["event"]
-        text = "".join(delta for _, delta in sorted(message["flushes"])).strip()
+    for response in displayed.values():
+        first = response["event"]
+        text = "".join(delta for _, delta in sorted(response["flushes"])).strip()
         prompt_id = first.get("prompt_id")
-        turn = message["closings"] + (
-            closings.get(prompt_id, []) if prompt_id
-            else [t for texts in closings.values() for t in texts]
+        turn = response["finals"] + (
+            finals.get(prompt_id, []) if prompt_id
+            else [t for texts in finals.values() for t in texts]
         )
         if not text or _repeats(text, turn):
             continue
-        entries.append((message["position"], Message(
-            _time(first.get("timestamp")), "Assistant message", _cut(text, MESSAGE_CHARS)
+        entries.append((response["position"], Message(
+            _time(first.get("timestamp")), "Agent intermediate response",
+            _cut(text, MESSAGE_CHARS),
         )))
     return [m for _, m in sorted(entries, key=lambda entry: entry[0])]
 
@@ -817,13 +819,13 @@ class Worker:
         events = [row["e"] for row in rows]
         shown = [e for e in events if e["event_name"] == DISPLAY_EVENT and e.get("prompt_id")]
         if shown:
-            closings = {
+            finals = {
                 row["prompt_id"]: row["texts"]
-                for row in _rows(self.db, TURN_CLOSINGS, session_id=self.session_id,
+                for row in _rows(self.db, FINAL_RESPONSES, session_id=self.session_id,
                                  prompt_ids=sorted({e["prompt_id"] for e in shown}))
             }
             for e in shown:
-                e["turn_closings"] = closings.get(e["prompt_id"], [])
+                e["final_responses"] = finals.get(e["prompt_id"], [])
         return events
 
     def ensure_anchors(self) -> None:
@@ -933,7 +935,7 @@ class Worker:
         if rendered is None:
             return Outcome("split", "input over budget")
         if not rendered.messages:
-            # No prompt and no closing message: nothing for the model to
+            # No prompt and no response: nothing for the model to
             # read, so no call is made. The run still marks the events
             # processed.
             try:

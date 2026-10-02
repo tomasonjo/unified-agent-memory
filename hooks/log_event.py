@@ -22,13 +22,14 @@ Storage decisions:
 - Inputs are stored: prompts and tool inputs (bounded at 8,000 chars), and
   the injection hook records what it injected on the SessionStart event,
   so a session can be reproduced from its record.
-- The assistant's text is stored, including what it writes between tool
-  calls, which no other event carries. ``MessageDisplay`` fires with each
-  batch of newly completed lines while a message streams (once per
-  message, with the whole text, outside the interactive terminal). Each
-  batch becomes one event with its ``message_id``, its ``index`` within
-  the message, ``final`` on the last one, and the lines as ``delta``;
-  consolidation reassembles the messages. The hook sits in the display
+- The agent's responses are stored: the final response each Stop
+  carries, and the intermediate responses it writes between tool calls,
+  which no other event carries. ``MessageDisplay`` fires with each batch
+  of newly completed lines while a response streams (once per response,
+  with the whole text, outside the interactive terminal). Each batch
+  becomes one event with its ``message_id``, its ``index`` within the
+  response, ``final`` on the last one, and the lines as ``delta``;
+  consolidation reassembles the responses. The hook sits in the display
   path, since the terminal waits for it before showing those lines, and
   it prints nothing, so the original text is shown.
 - Every :Session and :SessionEvent is stamped with a ``user_id`` (an email
@@ -113,7 +114,7 @@ def build_event_props(data: dict) -> dict:
         "tool_error": data.get("tool_error") or data.get("error"),
         "is_interrupt": data.get("is_interrupt"),
         "last_assistant_message": data.get("last_assistant_message"),
-        # MessageDisplay: one flush of a streaming assistant message.
+        # MessageDisplay: one flush of a response streaming to the screen.
         "turn_id": data.get("turn_id"),
         "message_id": data.get("message_id"),
         "index": data.get("index"),

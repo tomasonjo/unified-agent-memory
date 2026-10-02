@@ -31,7 +31,7 @@ pytestmark = pytest.mark.graph
 
 FINDING = "Renewal drop traced to March pipeline change"
 FIX = "Dashboard query corrected for reactivated contracts"
-CLOSING = (
+FINAL_RESPONSE = (
     "The drop comes from the March 3 pipeline change that reclassified "
     "reactivated contracts; analytics confirmed it. I corrected the dashboard "
     "query. Historical reports that cross March 3 still need checking."
@@ -54,7 +54,7 @@ def maria_first_turn(session_id: str = "s-maria") -> None:
         "Investigate the apparent drop in customer renewals.",
         [("Bash", {"command": "psql -f renewals.sql"}),
          ("Edit", {"file_path": "dashboards/renewals.sql"})],
-        CLOSING,
+        FINAL_RESPONSE,
     )
 
 
@@ -69,7 +69,7 @@ def test_a_turn_becomes_observations_and_a_summary(graph, model):
     assert "Project: renewal-analysis\nSession owner: maria@company.com" in user
     assert "Messages in the completed work window:" in user
     assert "Investigate the apparent drop in customer renewals." in user
-    assert CLOSING in user and "psql -f renewals.sql" not in user  # tool calls stay unread
+    assert FINAL_RESPONSE in user and "psql -f renewals.sql" not in user  # tool calls stay unread
     assert user.endswith("Previous session summary:\nnone yet")
 
     rows = graph.rows(
@@ -190,24 +190,24 @@ def test_what_the_assistant_said_during_a_turn_reaches_the_model(graph, model):
             "Correcting the dashboard query.\n")
     for flush in flushes(prompt_id, said):
         capture("s-maria", "MessageDisplay", **flush)
-    closing = ("I corrected the dashboard query.\n"
+    final = ("I corrected the dashboard query.\n"
                "Analytics confirmed the fix on the March numbers.")
-    first_line, last_line = flushes(prompt_id, closing)
+    first_line, last_line = flushes(prompt_id, final)
     capture("s-maria", "MessageDisplay", **first_line)
-    capture("s-maria", "Stop", last_assistant_message=closing, stop_hook_active=False,
+    capture("s-maria", "Stop", last_assistant_message=final, stop_hook_active=False,
             prompt_id=prompt_id)
     capture("s-maria", "MessageDisplay", **last_line)  # lands after its Stop
 
     scripted = model(FIRST_PASS)
     em.consolidate(["s-maria"])
     user = scripted.calls[0][1]["content"]
-    assert "Assistant message:\nChecking the renewal query first." in user
-    assert "Assistant message:\n" + said.strip() in user
-    assert "Assistant closing message:\n" + closing in user
+    assert "Agent intermediate response:\nChecking the renewal query first." in user
+    assert "Agent intermediate response:\n" + said.strip() in user
+    assert "Agent final response:\n" + final in user
     assert user.count("I corrected the dashboard query.") == 1  # its displayed copy is dropped
     assert "psql -f renewals.sql" not in user
 
-    # The closing message's last line is in the next window, and stays unread.
+    # The final response's last line is in the next window, and stays unread.
     turn("s-maria", "Check the historical reports.", [], "Two reports needed a rerun.")
     scripted = model({
         "observations": [observation("change", "Historical renewal reports rerun")],
@@ -271,7 +271,7 @@ def test_three_invalid_responses_stop_the_worker(graph, model):
 def test_overflow_splits_at_the_turn_boundary_and_never_commits_the_parent(graph, model):
     capture("s-maria", "SessionStart", source="startup")
     turn("s-maria", "Profile the renewal job.", [("Bash", {"command": "make profile"})],
-         closing=None)  # interrupted: no Stop fired
+         final_response=None)  # interrupted: no Stop fired
     turn("s-maria", "Now fix the slow join.", [("Edit", {"file_path": "job.sql"})],
          "Rewrote the join; the job runs in 4 minutes instead of 40.")
     scripted = model(
@@ -399,12 +399,12 @@ def test_the_worker_commits_the_closing_event_it_was_started_for(graph, model):
     capture("s-maria", "UserPromptSubmit", prompt="Investigate the renewal drop.",
             prompt_id="p1")
     stop = {"session_id": "s-maria", "hook_event_name": "Stop", "cwd": str(ROOT),
-            "prompt_id": "p1", "last_assistant_message": CLOSING,
+            "prompt_id": "p1", "last_assistant_message": FINAL_RESPONSE,
             "stop_hook_active": False}
     model(FIRST_PASS)
     em.run_worker(stop)
     assert graph.value("MATCH (o:Observation) RETURN count(o)") == 2
-    capture("s-maria", "Stop", prompt_id="p1", last_assistant_message=CLOSING,
+    capture("s-maria", "Stop", prompt_id="p1", last_assistant_message=FINAL_RESPONSE,
             stop_hook_active=False)
     assert graph.value(
         "MATCH (e:SessionEvent {session_id: 's-maria', event_name: 'Stop'}) RETURN count(e)"

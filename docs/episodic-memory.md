@@ -138,15 +138,15 @@ In `hooks/common.py`:
   A failed tool call keeps its reason as `tool_error`, cut to 1,000
   characters: Claude Code sends it as `error`, so chapter 2 had stored
   none. And every event keeps the harness's `prompt_id`, which enters the
-  content hash, so a turn that repeats an earlier prompt or closing
-  message word for word is not dropped as a duplicate.
-- **Displayed text** (implemented, see [conflict 16](#11-conflicts-to-resolve)).
-  Capture also runs on `MessageDisplay`, the only event that carries what
-  the assistant writes between tool calls. Claude Code fires it with each
-  batch of newly completed lines while a message streams, at most ten
-  times a second and up to three at once, and once per message, with the
+  content hash, so a turn that repeats an earlier prompt or final
+  response word for word is not dropped as a duplicate.
+- **Intermediate responses** (implemented, see [conflict 16](#11-conflicts-to-resolve)).
+  Capture also runs on `MessageDisplay`, the only event that carries the
+  intermediate responses the agent writes between tool calls. Claude Code fires it with each
+  batch of newly completed lines while a response streams, at most ten
+  times a second and up to three at once, and once per response, with the
   whole text, outside the interactive terminal. Each flush becomes one
-  event with `message_id` (stable across the message's flushes), `index`,
+  event with `message_id` (stable across the response's flushes), `index`,
   `final`, and the lines as `delta`, bounded at 8,000 characters. The
   terminal waits for the hook before it shows those lines (Claude Code
   ignores `async` here and cuts the hook off after 10 seconds); a capture
@@ -210,11 +210,11 @@ the worker processes ready windows until none remain:
   detail the summary most often lacks. The excerpt is stored on the run.
 
 **Decision:** the model reads only the window's messages: the user's
-prompts, what the assistant wrote during each turn, and the closing
-assistant message of each `Stop`. A turn's closing message reports what
-the turn did and how it ended, and the text between tool calls says what
+prompts and the agent's intermediate and final responses. A turn's final
+response, which its `Stop` carries, reports what the turn did and how it
+ended. The intermediate responses, written between tool calls, say what
 the agent was doing and noticed on the way, which matters most when a
-turn is interrupted before it closes. Its tool calls show
+turn is interrupted before it ends. Its tool calls show
 only what was attempted, since capture keeps no tool output, and in long
 turns they made up most of the input: two real captured turns of 291 and
 342 events held 141 and 168 tool calls. So tool calls, subagent reports
@@ -226,16 +226,16 @@ That also keeps the harness's internal agents out of the input
 record keeps every event for direct queries and for
 `expand(id, events=true)`.
 
-**Decision:** a displayed message is reassembled from its `MessageDisplay`
-flushes by `message_id`, in `index` order, since parallel hooks can land
-them out of order, and placed where its first flush landed. The closing
-message is displayed too, so it reaches the record twice; the `Stop` copy
-is the one read. A displayed message that repeats its turn's closing
-message (matched by `prompt_id`, ignoring whitespace and truncation
-markers, either text containing the other) is dropped. The worker looks
-those closing messages up across the whole session, because the hook for
-a closing message's last lines can finish after `Stop` and land in the
-next window; there they are processed and dropped, never read as part of
+**Decision:** a displayed response is reassembled from its
+`MessageDisplay` flushes by `message_id`, in `index` order, since parallel
+hooks can land them out of order, and placed where its first flush
+landed. The final response is displayed too, so it reaches the record
+twice; the `Stop` copy is the one read. A displayed response that repeats
+its turn's final response (matched by `prompt_id`, ignoring whitespace and
+truncation markers, either text containing the other) is dropped. The
+worker looks those final responses up across the whole session, because
+the hook for a final response's last lines can finish after `Stop` and
+land in the next window; there they are processed and dropped, never read as part of
 the next turn.
 
 **Decision:** the whole model input stays within 30,000 characters. That
@@ -248,15 +248,15 @@ window fills what is left, always in chronological order:
    8,000 characters each. Only when they overflow is each one cut to its
    start and end, with an omission marker, down to a floor of 1,500
    characters. The start is kept because a prompt's ask comes first, and
-   the end because an answer's conclusion comes last. A displayed
-   message is held to the same 8,000 characters, cut to its start and
+   the end because an answer's conclusion comes last. An intermediate
+   response is held to the same 8,000 characters, cut to its start and
    end.
 2. **Recalled memory.** The ids and titles of memory delivered in the
    window go in, so the model can attribute a restated claim to its
    origin. The full recall blocks never do.
 
 **Decision:** a window with no message to read (a side agent's stop
-followed by `SessionEnd`, say, or a closing message's late lines) is committed as a completed run
+followed by `SessionEnd`, say, or a final response's late lines) is committed as a completed run
 without a model call, with no `llm_model`. There is nothing to interpret,
 and the run still marks its events processed. Every run marks its whole
 window processed, tool events included, so a skipped event is never left
@@ -608,7 +608,7 @@ The signature is `expand(id, events=False, cursor=None)`.
   exactly the events its run processed: the walk starts at the window's
   first event and stops at its last. Each event shows its time, name,
   tool, and a bounded excerpt of the prompt, input, displayed lines, or
-  closing message.
+  final response.
   Delivered recall blocks appear as they were delivered, so expanding a
   receiving session's events shows the handoff it was given, even after
   the summary has moved on. `cursor` continues the page.
@@ -693,8 +693,8 @@ UAM_TEST_DATABASE=uamtest uv run --with pytest --with neo4j pytest tests
 4. Finishing the work in the first session adds an observation, raises
    the summary's `version`, and leaves the earlier observations unchanged.
    The second session's delivery event still shows the version 1 headline.
-5. Without the closing outcome message, the account leaves the result
-   unknown.
+5. Without a final response that reports the outcome, the account
+   leaves the result unknown.
 6. Unrelated work by another session between two turns joins the project
    timeline, but not the first session's observations or summary.
 7. A title delivered by the recap does not suppress a later `expand` of
@@ -712,10 +712,10 @@ The concurrency cases need tests of their own:
 - Extraction racing capture on `Stop` still sees the closing event.
 
 The input needs a test too: a turn with hundreds of tool calls renders only
-its prompt and closing message, both whole, within 30,000 characters. A
-displayed message is reassembled from flushes that landed out of order,
-and a closing message is read once, even when its last line lands after
-its `Stop`.
+its prompt and final response, both whole, within 30,000 characters. An
+intermediate response is reassembled from flushes that landed out of
+order, and a final response is read once, even when its last line lands
+after its `Stop`.
 
 Log the extraction cost per window, the injected characters per session,
 and the retrieval latency, so chapter 9's comparisons with and without
@@ -793,7 +793,7 @@ delivered blocks are on their events.
    ([4.2](#42-window-and-input-budget)).
 10. **Repeated turns were dropped. Fixed in capture.** The event id is a
     hash of the payload without its timestamp, so a turn that repeated an
-    earlier prompt ("continue") or closing message ("Done.") word for word
+    earlier prompt ("continue") or final response ("Done.") word for word
     collapsed into the earlier event. For consolidation that silently
     removed a window boundary. Capture now keeps the harness's
     `prompt_id`, one id per user prompt, which enters the hash; parallel
@@ -835,10 +835,11 @@ delivered blocks are on their events.
     them on its first run, before it writes anything, and the MCP server on
     its first search, and both wait for them. The chapter's wording holds
     if "setup" means that first run; saying so would remove the question.
-16. **Text between tool calls. Fixed in capture and consolidation; the
-    chapter follows.** Consolidation used to read only prompts and closing
-    messages, and the chapter said no hook carries the assistant's text
-    between tool calls. `MessageDisplay` does ([3](#3-capture-changes)).
+16. **Intermediate responses. Fixed in capture and consolidation; the
+    chapter follows.** Consolidation used to read only prompts and final
+    responses (then called closing messages), and the chapter said no hook
+    carries the intermediate responses the agent writes between tool
+    calls. `MessageDisplay` does ([3](#3-capture-changes)).
     Capture now records it and consolidation reads it
     ([4.2](#42-window-and-input-budget)); chapter 3 says so where it
     introduces the extraction input. The hooks reference documents the

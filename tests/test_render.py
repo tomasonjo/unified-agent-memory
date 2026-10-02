@@ -14,7 +14,7 @@ def event(name: str, index: int, **fields) -> dict:
 
 
 def big_turn(calls: int) -> list[dict]:
-    """A turn with a long prompt, many tool calls, and a long closing message."""
+    """A turn with a long prompt, many tool calls, and a long final response."""
     events = [event("UserPromptSubmit", 0, prompt="P" * 8000)]
     for i in range(calls):
         tool = ("Read", "Bash", "Edit")[i % 3]
@@ -31,13 +31,13 @@ def big_turn(calls: int) -> list[dict]:
     return events
 
 
-def test_only_the_prompt_and_closing_message_reach_the_model():
+def test_only_the_prompt_and_final_response_reach_the_model():
     events = big_turn(400)
     rendered = em.render_window(events, 24_000)
     assert rendered is not None and rendered.messages == 2
     assert rendered.text == (
         "[--:--:--] User prompt:\n" + "P" * 8000
-        + "\n[--:--:--] Assistant closing message:\n" + "C" * 8000
+        + "\n[--:--:--] Agent final response:\n" + "C" * 8000
     )
     assert rendered.message_cap is None
 
@@ -87,7 +87,7 @@ def test_tools_subagents_and_bookkeeping_never_reach_the_model():
     rendered = em.render_window(events, 10**6)
     assert rendered.text == (
         "[--:--:--] User prompt:\nFix the query\n"
-        "[--:--:--] Assistant closing message:\nQuery corrected."
+        "[--:--:--] Agent final response:\nQuery corrected."
     )
 
 
@@ -174,7 +174,7 @@ def test_an_unchanged_summary_is_not_rewritten():
     assert em.validate({"observations": [], "summary": None}, previous, 3, set()).summary is None
 
 
-# --- what the assistant wrote during a turn ----------------------------------
+# --- intermediate responses ---------------------------------------------------
 
 
 def shown(position: int, message_id: str, part: int, delta: str, prompt_id="p1", **fields) -> dict:
@@ -183,7 +183,7 @@ def shown(position: int, message_id: str, part: int, delta: str, prompt_id="p1",
                     message_id=message_id, delta=delta, **fields), "index": part}
 
 
-def test_displayed_messages_are_reassembled_from_their_flushes():
+def test_intermediate_responses_are_reassembled_from_their_flushes():
     events = [
         event("UserPromptSubmit", 0, prompt="Why did renewals drop?", prompt_id="p1"),
         # Parallel hooks can land a message's flushes out of order.
@@ -197,35 +197,35 @@ def test_displayed_messages_are_reassembled_from_their_flushes():
     rendered = em.render_window(events, 10**6)
     assert rendered.text == (
         "[--:--:--] User prompt:\nWhy did renewals drop?\n"
-        "[--:--:--] Assistant message:\n"
+        "[--:--:--] Agent intermediate response:\n"
         "Checking the renewal query first.\nThen the pipeline log.\n"
-        "[--:--:--] Assistant message:\n"
+        "[--:--:--] Agent intermediate response:\n"
         "The March 3 change reclassified reactivated contracts.\n"
-        "[--:--:--] Assistant closing message:\nQuery corrected."
+        "[--:--:--] Agent final response:\nQuery corrected."
     )
 
 
-def test_the_closing_message_is_read_once():
-    closing = "Query corrected.\nAnalytics confirmed the fix."
+def test_the_final_response_is_read_once():
+    final = "Query corrected.\nAnalytics confirmed the fix."
     events = [
         event("UserPromptSubmit", 0, prompt="Fix the query", prompt_id="p1"),
         shown(1, "m1", 0, "Query corrected.\n"),
         shown(2, "m1", 1, "Analytics confirmed the fix.", final=True),
-        event("Stop", 3, prompt_id="p1", last_assistant_message=closing),
+        event("Stop", 3, prompt_id="p1", last_assistant_message=final),
     ]
     rendered = em.render_window(events, 10**6)
     assert rendered.messages == 2
     assert rendered.text.count("Analytics confirmed the fix.") == 1
-    assert "Assistant message" not in rendered.text
+    assert "Agent intermediate response" not in rendered.text
 
 
-def test_closing_lines_that_land_after_their_stop_are_dropped():
+def test_final_response_lines_that_land_after_their_stop_are_dropped():
     # The previous turn's Stop is outside this window; the worker passes
-    # its closing message along as turn_closings.
+    # its final response along as final_responses.
     earlier = ["Query corrected.\nAnalytics confirmed the fix."]
     events = [
         shown(0, "m1", 1, "Analytics confirmed the fix.", prompt_id="p0",
-              final=True, turn_closings=earlier),
+              final=True, final_responses=earlier),
         event("SessionEnd", 1),
     ]
     rendered = em.render_window(events, 10**6)
@@ -242,7 +242,7 @@ def test_an_interrupted_turn_keeps_what_the_assistant_said():
         event("Stop", 4, prompt_id="p2", last_assistant_message="Summary sent."),
     ]
     rendered = em.render_window(events, 10**6)
-    assert "Assistant message:\nThe March 3 change" in rendered.text
+    assert "Agent intermediate response:\nThe March 3 change" in rendered.text
     assert rendered.messages == 4
 
 

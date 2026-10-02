@@ -84,7 +84,7 @@ def capture(session_id: str, event_name: str, **fields) -> str:
 
 
 def flushes(prompt_id: str, text: str) -> list[dict]:
-    """A displayed message as MessageDisplay delivers it: one line per flush.
+    """A response as MessageDisplay delivers it: one line per flush.
 
     Each item is the payload of one flush, for ``capture(..., "MessageDisplay", **item)``.
     """
@@ -101,11 +101,11 @@ def turn(
     session_id: str,
     prompt: str,
     tools: list[tuple[str, dict]],
-    closing: str | None,
+    final_response: str | None,
 ) -> str:
-    """One turn: a prompt, tool calls (Pre and Post), and the closing message.
+    """One turn: a prompt, tool calls (Pre and Post), and the final response.
 
-    ``closing=None`` is a turn the user interrupted: no Stop fires. Returns
+    ``final_response=None`` is a turn the user interrupted: no Stop fires. Returns
     the turn's prompt id.
     """
     prompt_id = uuid.uuid4().hex
@@ -116,8 +116,8 @@ def turn(
                 tool_use_id=use, prompt_id=prompt_id)
         capture(session_id, "PostToolUse", tool_name=tool, tool_input=tool_input,
                 tool_use_id=use, tool_response="ok", prompt_id=prompt_id)
-    if closing is not None:
-        capture(session_id, "Stop", last_assistant_message=closing,
+    if final_response is not None:
+        capture(session_id, "Stop", last_assistant_message=final_response,
                 stop_hook_active=False, prompt_id=prompt_id)
         # The prompt-suggestion side agent that runs after every turn.
         capture(session_id, "SubagentStop", agent_type="", agent_id=f"a{prompt_id[:8]}",

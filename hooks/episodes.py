@@ -595,7 +595,7 @@ def render_observation(data: dict, now: datetime | None = None) -> str:
     produced_by = data.get("run") or {}
     if produced_by.get("event_count"):
         context.append(
-            f"Evidence: written from the prompts and assistant messages among "
+            f"Evidence: written from the prompts and agent responses among "
             f"{produced_by['event_count']} captured events; "
             f'expand("{name}", events=true) opens them.'
         )
