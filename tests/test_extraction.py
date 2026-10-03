@@ -43,7 +43,6 @@ FIRST_PASS = {
         "Corrected the current dashboard query. Historical reports that "
         "cross March 3 are not yet checked.",
     ),
-    "overflow": False,
 }
 
 
@@ -65,7 +64,7 @@ def test_a_turn_becomes_observations_and_a_summary(graph, model):
 
     assert len(scripted.calls) == 1
     system, user = (m["content"] for m in scripted.calls[0])
-    assert "Write up to 3 observations" in system
+    assert "Write one observation for each distinct piece of work" in system
     assert "Project: renewal-analysis\nSession owner: maria@company.com" in user
     assert "Messages in the completed work window:" in user
     assert "Investigate the apparent drop in customer renewals." in user
@@ -144,7 +143,6 @@ def test_the_next_turn_adds_an_observation_and_a_summary_version(graph, model):
         "observations": [observation("change", "Historical renewal reports rerun")],
         "summary": summary("Renewal drop explained; history checked",
                            "Corrected the query and reran two reports."),
-        "overflow": False,
     })
     em.consolidate(["s-maria"])
 
@@ -213,7 +211,6 @@ def test_what_the_assistant_said_during_a_turn_reaches_the_model(graph, model):
         "observations": [observation("change", "Historical renewal reports rerun")],
         "summary": summary("Renewal drop explained; history checked",
                            "Corrected the query and reran two reports."),
-        "overflow": False,
     })
     em.consolidate(["s-maria"])
     user = scripted.calls[0][1]["content"]
@@ -268,20 +265,21 @@ def test_three_invalid_responses_stop_the_worker(graph, model):
     assert graph.value("MATCH (r:ExtractionRun {status: 'completed'}) RETURN count(r)") == 0
 
 
-def test_overflow_splits_at_the_turn_boundary_and_never_commits_the_parent(graph, model):
+def test_truncated_output_splits_at_the_turn_boundary_and_never_commits_the_parent(graph, model):
     capture("s-maria", "SessionStart", source="startup")
     turn("s-maria", "Profile the renewal job.", [("Bash", {"command": "make profile"})],
          final_response=None)  # interrupted: no Stop fired
     turn("s-maria", "Now fix the slow join.", [("Edit", {"file_path": "job.sql"})],
          "Rewrote the join; the job runs in 4 minutes instead of 40.")
+    whole = {"observations": [observation("problem", "Renewal job profiling interrupted"),
+                              observation("bugfix", "Slow renewal join rewritten")],
+             "summary": summary("Renewal job fixed", "Join rewritten.")}
     scripted = model(
-        {"observations": [], "summary": None, "overflow": True},
+        json.dumps(whole)[:-40],
         {"observations": [observation("problem", "Renewal job profiling interrupted")],
-         "summary": summary("Renewal job performance", "Profiling started; the join still needs a fix."),
-         "overflow": False},
+         "summary": summary("Renewal job performance", "Profiling started; the join still needs a fix.")},
         {"observations": [observation("bugfix", "Slow renewal join rewritten")],
-         "summary": summary("Renewal job fixed", "Join rewritten."),
-         "overflow": False},
+         "summary": summary("Renewal job fixed", "Join rewritten.")},
     )
     em.consolidate(["s-maria"])
     assert len(scripted.calls) == 3
@@ -292,7 +290,7 @@ def test_overflow_splits_at_the_turn_boundary_and_never_commits_the_parent(graph
         "MATCH (r:ExtractionRun) RETURN r.status AS status, r.window_key AS key, "
         "r.event_count AS events ORDER BY r.created_at"
     )
-    assert [r["status"] for r in runs] == ["overflow", "completed", "completed"]
+    assert [r["status"] for r in runs] == ["truncated", "completed", "completed"]
     parent = runs[0]["key"]
     assert parent not in {r["key"] for r in runs[1:]}
     assert runs[0]["events"] == runs[1]["events"] + runs[2]["events"]
@@ -361,7 +359,7 @@ def test_a_worker_whose_lease_expired_cannot_commit(graph, model):
     key = em.window_key(window)
     context = stale.context(window)
     rendered = em.render_window(window, 20_000)
-    extraction = em.validate(FIRST_PASS, None, 3, set())
+    extraction = em.validate(FIRST_PASS, None, set())
 
     # The model call outlived the lease, and another worker took over.
     graph.session.run(
@@ -389,7 +387,7 @@ def test_a_worker_that_read_an_older_summary_cannot_commit(graph, model):
     with pytest.raises(em.Stale, match="summary changed"):
         worker.commit(window, em.window_key(window), context,
                       em.render_window(window, 20_000),
-                      em.validate(FIRST_PASS, None, 3, set()), "m", 1)
+                      em.validate(FIRST_PASS, None, set()), "m", 1)
 
 
 def test_the_worker_commits_the_closing_event_it_was_started_for(graph, model):
@@ -421,14 +419,13 @@ def test_other_work_between_turns_joins_the_timeline_not_the_session(graph, mode
     turn("s-alex", "Rotate the auth tokens.", [("Bash", {"command": "vault rotate"})],
          "Rotated the tokens.")
     model({"observations": [observation("change", "Auth tokens rotated")],
-           "summary": summary("Auth tokens rotated", "Rotated."), "overflow": False})
+           "summary": summary("Auth tokens rotated", "Rotated.")})
     em.consolidate(["s-alex"])
 
     monkeypatch.setenv("UAM_USER_ID", MARIA)
     turn("s-maria", "Check the historical reports.", [], "Checked; all fine.")
     scripted = model({"observations": [observation("change", "Historical reports checked")],
-                      "summary": summary("History checked", "Checked."),
-                      "overflow": False})
+                      "summary": summary("History checked", "Checked.")})
     em.consolidate(["s-maria"])
 
     assert "Rotate" not in scripted.calls[0][1]["content"]

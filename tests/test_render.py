@@ -45,7 +45,7 @@ def test_only_the_prompt_and_final_response_reach_the_model():
 def test_whole_input_stays_within_thirty_thousand_characters():
     events = big_turn(400)
     context = em.Context("s1", "renewal-analysis", "maria@company.com", None, None)
-    instructions = em.INSTRUCTIONS.format(max_observations=em.MAX_OBSERVATIONS)
+    instructions = em.INSTRUCTIONS
     frame = em.user_message(context, "", None)
     budget = em.INPUT_CHARS - len(instructions) - len(frame) - 400
     rendered = em.render_window(events, budget)
@@ -124,13 +124,12 @@ GOOD = {
     ],
     "summary": {"headline": "Renewal drop explained", "request": "Investigate",
                 "progress": "Diagnosed; reports unchecked", "outcome": ""},
-    "overflow": False,
 }
 
 
 def test_parse_accepts_a_fenced_object_with_trailing_prose():
     text = "```json\n" + json.dumps(GOOD) + "\n```"
-    assert em.parse_response(text)["overflow"] is False
+    assert em.parse_response(text) == GOOD
     assert em.parse_response("Here: " + json.dumps(GOOD) + " done")["summary"]
 
 
@@ -142,7 +141,7 @@ def test_parse_tells_truncation_from_garbage():
 
 
 def test_validate_keeps_only_delivered_cites():
-    result = em.validate(GOOD, None, 3, {"o7"})
+    result = em.validate(GOOD, None, {"o7"})
     assert result.observations[0]["cites"] == ["o7"]
     assert result.summary["headline"] == "Renewal drop explained"
 
@@ -151,27 +150,26 @@ def test_validate_rejects_rather_than_shortens():
     bad = json.loads(json.dumps(GOOD))
     bad["observations"][0]["title"] = "Possible pipeline cause, " + "x" * 120
     with pytest.raises(em.Invalid, match="title is .* characters"):
-        em.validate(bad, None, 3, set())
+        em.validate(bad, None, set())
     bad = json.loads(json.dumps(GOOD))
     bad["observations"][0]["type"] = "insight"
     with pytest.raises(em.Invalid, match="type must be one of"):
-        em.validate(bad, None, 3, set())
+        em.validate(bad, None, set())
     bad = json.loads(json.dumps(GOOD))
     del bad["summary"]
     with pytest.raises(em.Invalid, match="summary is missing"):
-        em.validate(bad, None, 3, set())
+        em.validate(bad, None, set())
 
 
-def test_more_observations_than_allowed_is_overflow():
+def test_every_observation_is_kept():
     many = {**GOOD, "observations": GOOD["observations"] * 4}
-    result = em.validate(many, None, 3, set())
-    assert result.overflow and len(result.observations) == 3
+    assert len(em.validate(many, None, set()).observations) == 4
 
 
 def test_an_unchanged_summary_is_not_rewritten():
     previous = dict(GOOD["summary"])
-    assert em.validate(GOOD, previous, 3, set()).summary is None
-    assert em.validate({"observations": [], "summary": None}, previous, 3, set()).summary is None
+    assert em.validate(GOOD, previous, set()).summary is None
+    assert em.validate({"observations": [], "summary": None}, previous, set()).summary is None
 
 
 # --- intermediate responses ---------------------------------------------------

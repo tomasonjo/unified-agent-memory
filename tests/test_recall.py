@@ -204,8 +204,7 @@ def test_the_delivery_keeps_the_handoff_the_session_received(maria_worked, model
          "All historical reports that cross March 3 were checked.")
     model({"observations": [observation("change", "Historical reports checked")],
            "summary": summary("Renewal drop resolved; history checked",
-                              "Corrected the query and checked history."),
-           "overflow": False})
+                              "Corrected the query and checked history.")})
     em.consolidate(["s-maria"])
 
     assert graph.value(

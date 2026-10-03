@@ -189,8 +189,8 @@ call never sits in the session's way. The worker appends the closing event
 itself, which makes the window ready, then reads the turn's captured
 events from the graph (not the harness's transcript) together with the
 session's previous summary, and makes one call to the background-agent LLM.
-The model returns up to three observations and the updated summary; the
-worker validates them and one transaction writes them with their
+The model returns one observation per distinct piece of work and the
+updated summary; the worker validates them and one transaction writes them with their
 provenance:
 
 ```
@@ -497,7 +497,7 @@ Resolution rules:
 `tests/` checks consolidation and recall against a scratch Neo4j
 database, which the tests wipe, with a scripted model in place of the real
 one: the chapter's handoff between two users, leases, stale workers,
-overflow splits, the input budget, and duplicate suppression. Name the
+window splits, the input budget, and duplicate suppression. Name the
 database in `UAM_TEST_DATABASE` (the name must contain "test"); the
 connection comes from the env file as for the hooks:
 

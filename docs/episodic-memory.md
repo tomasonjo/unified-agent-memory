@@ -25,7 +25,7 @@ chapter:
 | Topic | First design | Chapter 3 (this design) |
 |---|---|---|
 | Summary history | Overwritten; earlier states treated as redundant | One current summary with a stable `id` and a `version`; every extraction run keeps the input and output summary JSON |
-| Quiet windows | Always 1–3 observations | 0–3; a window without messages yields none, with no model call; the summary comes back unchanged, or `null` when there is none; `overflow` flags more than three developments |
+| Quiet windows | Always 1–3 observations | One per distinct piece of work, possibly none; a window without messages yields none, with no model call; the summary comes back unchanged, or `null` when there is none |
 | Failed runs | `ExtractionRun {status: 'error'}` | A failure never marks events; an event counts as processed only through a completed run; diagnostics are stored separately |
 | Time | `started_at`, `ended_at` | `source_start`, `source_end` from event timestamps, separate from `created_at`; ages and `since` use `source_end` |
 | Concurrency | Idempotent watermark | Per-session lease, fixed window, summary version checked at commit, ids derived from window and position, project tail updated under a lock |
@@ -66,7 +66,7 @@ extraction should "retain the originating memory references".
 | `SessionEvent` | `prompt_id` and, on a failed tool call, `tool_error` ([3](#3-capture-changes)); on delivery events: `recall_block`, `recall_channel`, `recall_status` |
 | `Observation` | `id`, `display_id` (`o112`), `project_id`, `session_id`, `type`, `title`, `narrative`, `source_start`, `source_end`, `created_at`, `embedding` |
 | `SessionSummary` | `id`, `session_id`, `project_id`, `version`, `headline`, `request`, `progress`, `outcome`, `source_start`, `source_end`, `created_at`, `updated_at`, `embedding` |
-| `ExtractionRun` | `id`, `status`, `session_id`, `window_key`, `llm_model`, `event_count`, `created_at`, `input_summary_version`, `input_summary_json`, `output_summary_version`, `output_summary_json`, `input_excerpts_json`, `input_chars`, `input_trim_json`, `error`, `overflow` |
+| `ExtractionRun` | `id`, `status`, `session_id`, `window_key`, `llm_model`, `event_count`, `created_at`, `input_summary_version`, `input_summary_json`, `output_summary_version`, `output_summary_json`, `input_excerpts_json`, `input_chars`, `input_trim_json`, `error` |
 
 Neo4j cannot constrain relationship counts, so the writer maintains them:
 each session has one owner, one project, and at most one summary; each
@@ -192,7 +192,7 @@ by hand.
 
 ### 4.2 Window and input budget
 
-While it holds the session's lease ([4.5](#45-leases-failures-and-overflow)),
+While it holds the session's lease ([4.5](#45-leases-failures-and-splits)),
 the worker processes ready windows until none remain:
 
 - **Selection.** A window is the session's events that have no
@@ -245,7 +245,7 @@ no tokenizer is needed. The instructions and context always go in, and the
 window fills what is left, always in chronological order:
 
 1. **Messages.** They go in at the length capture stored, which is at most
-   8,000 characters each. Only when they overflow is each one cut to its
+   8,000 characters each. Only when they do not fit is each one cut to its
    start and end, with an omission marker, down to a floor of 1,500
    characters. The start is kept because a prompt's ask comes first, and
    the end because an answer's conclusion comes last. An intermediate
@@ -273,10 +273,9 @@ extractor read?" answerable exactly.
 The worker makes one `llm_complete()` call per window with the chapter's
 extraction prompt, and keeps every rule in it:
 
-- Extract new developments only, with at most three observations, each
-  using one of the seven types.
+- Extract new developments only, one observation per distinct piece of
+  work, each using one of the seven types.
 - State only what the record supports, and preserve identifiers.
-- Set `overflow` when more than three developments need observations.
 - Carry the summary forward.
 - Include routine work, and return no observations when the messages
   describe no work.
@@ -291,15 +290,12 @@ whose claim it restates.
 The writer, not the model, decides what is stored:
 
 - `type` is one of the seven values. `title` is one line of at most 120
-  characters. `narrative` is at most 1,500 characters. At most three observations are
-  kept.
+  characters. `narrative` is at most 1,500 characters.
 - The summary's `headline` is at most 120 characters, and each of its
   other four fields at most 1,500. `null`, or a copy of the previous
   summary, means unchanged.
 - `cites` keeps only ids that were delivered to this session.
-- More observations than allowed means more developments than the window
-  holds, which is overflow.
-- Anything else counts as a failure ([4.5](#45-leases-failures-and-overflow)).
+- Anything else counts as a failure ([4.5](#45-leases-failures-and-splits)).
   Output that breaks a limit is rejected, never shortened: cutting a title
   could drop the qualification that gives it its meaning.
 
@@ -348,7 +344,7 @@ transaction. The transaction then runs these steps:
 5. **Display id.** It gives the session a `display_id` if it has none and
    now has a summary or an observation.
 
-### 4.5 Leases, failures, and overflow
+### 4.5 Leases, failures, and splits
 
 - **Lease.** The lease lives in `extraction_lease_owner` and
   `extraction_lease_until` on the session. A worker takes it in a write
@@ -364,18 +360,15 @@ transaction. The transaction then runs these steps:
   A failed call stops the worker at once. After three invalid responses in
   a row, the worker stops and leaves the window to the next trigger or
   sweep.
-- **Overflow.** `overflow: true` or truncated output is recorded as
-  `status: "overflow"`, and the window is retried in parts. It is split
-  first at the turn boundaries inside it (a prompt that follows an earlier
-  prompt; lifecycle events before the first prompt belong to its turn),
-  then in halves, and each part is committed on its own. The overflowed
-  window itself is never committed, so it and its parts can never both be.
-  A window too large for the input budget is split the same way before any
-  call. A single-event window cannot be split; it is retried once with a
-  limit of six observations and a larger output allowance. **Decision:** if
-  the model still reports overflow then, the six observations are
-  committed and the run carries `overflow: true`, rather than leaving the
-  session stuck on one event.
+- **Split.** Truncated output is recorded as `status: "truncated"`, and
+  the window is retried in parts. It is split first at the turn boundaries
+  inside it (a prompt that follows an earlier prompt; lifecycle events
+  before the first prompt belong to its turn), then in halves, and each
+  part is committed on its own. The truncated window itself is never
+  committed, so it and its parts can never both be. A window too large for
+  the input budget is split the same way before any call. A single-event
+  window cannot be split; like repeated invalid output, it is left to the
+  next trigger or sweep.
 - A completed window is never selected again, so reprocessing adds
   nothing.
 
@@ -708,7 +701,7 @@ The concurrency cases need tests of their own:
 
 - Two workers on one session get one lease between them.
 - A worker whose lease expired during the model call cannot commit.
-- An overflow split never commits both a window and its parts.
+- A split never commits both a window and its parts.
 - Extraction racing capture on `Stop` still sees the closing event.
 
 The input needs a test too: a turn with hundreds of tool calls renders only
