@@ -324,8 +324,8 @@ argument is a filter, not an authorization check: anyone who can reach the
 database can read all of it through these tools. `search_episodic` matches
 stored text through a fulltext index that consolidation creates on its
 first run (and the server on its first search, if it is missing). Setting
-`UAM_EMBEDDING_MODEL` adds similarity search, whose matches are merged
-with the text matches by reciprocal rank fusion.
+`UAM_EMBEDDING_MODEL` adds similarity search. Each kind of match is
+scaled by its best score, and a record both find keeps its higher one.
 
 The server is read-only by construction. It pins
 `NEO4J_MCP_READ_ONLY=true` for the Neo4j server, which then never

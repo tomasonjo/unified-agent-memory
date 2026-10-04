@@ -36,13 +36,12 @@ from datetime import datetime, timedelta, timezone
 KINDS = ("observation", "session", "both")
 
 MAX_SEARCH_LIMIT = 50
-# Each leg hands rank fusion this many candidates per wanted row. The
+# Each leg hands fusion this many candidates per wanted row. The
 # vector index filters by project as it searches, but the since and kind
 # filters apply to its nearest nodes afterwards, so a vector leg
 # over-fetches by this factor; the fulltext leg filters first and keeps
 # its best this many.
 CANDIDATES_PER_ROW = 5
-RRF_K = 60
 
 ROW_CHARS = 200
 FIELD_CHARS = 1500
@@ -397,37 +396,39 @@ def vector_search(in_project: bool) -> str:
 
 
 # Each leg of the fused search returns its nodes as one list, best first.
+# A fulltext score and a cosine similarity are on different scales, so
+# each leg divides its scores by its best one: both legs then run 0-1.
+NORMALIZED = """
+WITH collect({node: node, score: score}) AS hits, max(score) AS best
+UNWIND hits AS hit
+RETURN hit.node AS node, hit.score / best AS score"""
+
 FULLTEXT_BRANCH = f"""
 CALL db.index.fulltext.queryNodes($index, $text)
 YIELD node, score
 WHERE {FILTERS}
-WITH node ORDER BY score DESC LIMIT $candidates
-RETURN collect(node) AS ranked"""
+WITH node, score ORDER BY score DESC LIMIT $candidates""" + NORMALIZED
 
 
 def vector_branch(in_project: bool) -> str:
-    return "\n" + vector_search(in_project) + f"""WHERE {FILTERS}
-WITH node ORDER BY score DESC
-RETURN collect(node) AS ranked"""
+    return "\n" + vector_search(in_project) + f"WHERE {FILTERS}" + NORMALIZED
 
 
-# Reciprocal rank fusion in the query: each position in a leg's list is
-# worth 1 / (k + rank), and a node's shares from all legs are summed.
+# A node both legs found keeps its higher normalized score; ties go to
+# the newer record.
 _FUSED_SEARCH = """CYPHER 25
 CALL () {{{branches}
 }}
-UNWIND range(1, size(ranked)) AS rank
-WITH ranked[rank - 1] AS node, 1.0 / ($rrf_k + rank) AS share
-WITH node, sum(share) AS score
-ORDER BY score DESC LIMIT $limit
+WITH node, max(score) AS score
+ORDER BY score DESC, node.source_end DESC LIMIT $limit
 OPTIONAL MATCH (s:Session)-[:HAS_SUMMARY]->(node)
 RETURN {fields}, score
-ORDER BY score DESC
+ORDER BY score DESC, source_end DESC
 """
 
 
 def fused_search(branches: list[str]) -> str:
-    """One query that runs ``branches`` and fuses their lists by rank."""
+    """One query that runs ``branches`` and merges their normalized scores."""
     return _FUSED_SEARCH.format(branches="\nUNION ALL".join(branches), fields=ROW_FIELDS)
 
 
@@ -447,19 +448,22 @@ def recent(run, project, kind="both", since=None, limit=20) -> list[dict]:
     return rows[:limit]
 
 
-def fuse(legs: list[list[dict]], k: int = RRF_K) -> list[dict]:
-    """Reciprocal rank fusion: a row gains ``1 / (k + rank)`` from each list.
+def fuse(legs: list[list[dict]]) -> list[dict]:
+    """Legs merged as the fused search merges them, best first.
 
-    Ranks start at 1. Positions rather than raw scores, so a fulltext
-    score and a cosine similarity never need to be comparable; ties keep
-    the order in which rows were first seen.
+    Each leg's scores are divided by its best one, so a fulltext score and
+    a cosine similarity share a 0-1 scale, and a row found by several legs
+    keeps its highest. Ties keep the order in which rows were first seen.
     """
     scores: dict[str, float] = {}
     rows: dict[str, dict] = {}
     for leg in legs:
-        for rank, row in enumerate(leg, start=1):
+        best = max((row["score"] for row in leg), default=0.0)
+        if best <= 0:
+            continue
+        for row in leg:
             key = row["key"]
-            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+            scores[key] = max(scores.get(key, 0.0), row["score"] / best)
             rows.setdefault(key, row)
     return sorted(rows.values(), key=lambda row: -scores[row["key"]])
 
@@ -494,8 +498,8 @@ def hybrid_search(
 
     Without a query this is the recency listing. With one, the fulltext
     leg searches both kinds in a single call, the vector index adds a leg
-    when a query vector is given, and reciprocal rank fusion merges them
-    in the same query.
+    when a query vector is given, and the same query merges their
+    normalized scores.
     """
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {', '.join(KINDS)}, not {kind!r}")
@@ -511,7 +515,7 @@ def hybrid_search(
     return _fused(
         run, branches, index=FULLTEXT_INDEX, text=text, vector=vector,
         project=project, kind=kind, since=since, limit=limit,
-        candidates=limit * CANDIDATES_PER_ROW, rrf_k=RRF_K,
+        candidates=limit * CANDIDATES_PER_ROW,
     )
 
 
@@ -825,9 +829,10 @@ OWN_PROGRESS_CHARS = 300
 RECALL_BLOCK_CHARS = 3000
 DELIVERY_BLOCK_CHARS = 8000
 
-# Reciprocal rank fusion orders candidates but cannot say whether any of
-# them is relevant, so prompt-time recall also asks each candidate to clear
-# a floor on at least one leg. That floor is what lets an unrelated prompt
+# Normalized scores order candidates but cannot say whether any of them
+# is relevant: each leg's best scores 1.0 however weak it is. So
+# prompt-time recall also asks each candidate to clear a floor on at
+# least one leg. That floor is what lets an unrelated prompt
 # receive nothing. A raw Lucene score makes a poor floor: it moves with the
 # size and wording of the store (the same record scored 2.6 for the same
 # query among three records, and 4.3 after four unrelated ones were
@@ -1157,7 +1162,7 @@ def related(
 
     The same legs as ``hybrid_search``, restricted to the project and to
     other sessions' records, with each leg's candidates cut at its floor
-    before rank fusion: shared words for the fulltext leg, similarity for
+    before fusion: shared words for the fulltext leg, similarity for
     the vector leg. No candidate above a floor means no rows.
     """
     terms = prompt_terms(prompt)

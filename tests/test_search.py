@@ -79,14 +79,16 @@ def test_related_recall_reads_the_same_index(indexed):
 
 def test_both_legs_are_fused_in_one_query(indexed):
     run = episodes.reader(indexed.session)
-    rows = episodes.hybrid_search(run, "renewal drop", QUERY, PROJECT)
-    assert {row["display_id"] for row in rows} == {"o1", "s1"}
-    # Found by both legs: two rank shares, more than any single leg's best.
-    assert all(row["score"] > 1 / (episodes.RRF_K + 1) for row in rows)
+    # Only o1's title says "pipeline"; the vector leg finds s1 as well.
+    rows = episodes.hybrid_search(run, "pipeline", QUERY, PROJECT)
+    assert [row["display_id"] for row in rows] == ["o1", "s1"]
+    # Each leg's best scores 1.0 once divided by that leg's best score.
+    assert rows[0]["score"] == 1.0
+    assert 0 < rows[1]["score"] < 1.0
 
 
 def test_a_missing_vector_index_costs_only_its_leg(indexed):
     indexed.session.run(f"DROP INDEX {episodes.VECTOR_INDEX}").consume()
     run = episodes.reader(indexed.session)
-    rows = episodes.hybrid_search(run, "renewal drop", QUERY, PROJECT)
-    assert {row["display_id"] for row in rows} == {"o1", "s1"}
+    rows = episodes.hybrid_search(run, "pipeline", QUERY, PROJECT)
+    assert [row["display_id"] for row in rows] == ["o1"]

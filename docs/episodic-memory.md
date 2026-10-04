@@ -443,8 +443,9 @@ from [6.3](#63-search_episodic) with the prompt as the query, within the
 project, over both kinds, excluding the current session's own records, and
 keeps at most three rows.
 
-Reciprocal rank fusion ranks candidates without measuring relevance, so a
-candidate must also clear a floor on at least one leg. That floor is what
+Normalized scores order candidates without measuring relevance (each
+leg's best scores 1.0 however weak it is), so a candidate must also clear
+a floor on at least one leg. That floor is what
 lets an unrelated prompt receive nothing. The embedding call counts
 against the hook's time budget. The block starts
 `Related memory from <project>:` and ends with the same framing lines as
@@ -585,12 +586,13 @@ The signature follows the chapter:
   projects' records cannot crowd this project's out: the fulltext leg in
   its `WHERE`, the vector leg inside the index. `since` and kind are not
   index properties, so the vector leg applies them to its nearest nodes
-  and over-fetches, taking about five times `limit`. Reciprocal rank
-  fusion with k = 60 merges the legs in the same Cypher query, as in the
-  chapter's listing. If that query fails, the first leg that runs alone
-  answers, so a missing index costs only its own leg. Prompt-time recall
-  still fuses in Python, because it filters fulltext candidates by
-  shared words before fusing.
+  and over-fetches, taking about five times `limit`. The same Cypher
+  query merges the legs, as in the chapter's listing: each leg divides
+  its scores by its best one, so both run 0–1, and a record both legs
+  found keeps its higher score. If that query fails, the first leg that
+  runs alone answers, so a missing index costs only its own leg.
+  Prompt-time recall merges its legs the same way in Python, because it
+  filters fulltext candidates by shared words first.
 - **Parameters.** `project` defaults to the current project. `since`
   accepts an ISO date or a relative span such as `7d`, and filters on
   `source_end`. `limit` is clamped to 1–50.
@@ -667,7 +669,7 @@ off as the completion.
 |---|---|---|
 | `hooks/common.py` | Project and user resolution with overrides; write-once owner and project anchors in `_append_event`; context generation; new constraints, one-query schema check, and env keys | Done |
 | `hooks/log_event.py` | Keeps `prompt_id`, and a failed call's reason as `tool_error` | Done |
-| `hooks/episodes.py` | New: schema and indexes, retrieval (recent records, hybrid search with RRF, expand queries), row rendering, display-id resolution, recap and prompt-time selection, delivery recording | Done |
+| `hooks/episodes.py` | New: schema and indexes, retrieval (recent records, hybrid search with normalized score fusion, expand queries), row rendering, display-id resolution, recap and prompt-time selection, delivery recording | Done |
 | `hooks/extract_memory.py` | New: the `Stop` and `SessionEnd` trigger, the `SessionStart` sweep, and the worker | Done |
 | `hooks/recall.py` | New: the `SessionStart` recap, `UserPromptSubmit` episodes, and `PostToolUse` records for the memory tools | Done |
 | `hooks/llm.py` | Adds `embed_texts()`, `completion_model()`, `max_tokens`, and the headless-call flags | Done |
