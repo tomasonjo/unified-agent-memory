@@ -575,16 +575,21 @@ characters.
 ### 6.3 search_episodic
 
 The signature follows the chapter:
-`search_episodic(query=None, project=None, kind="both", since=None, limit=20)`.
+`search_episodic(query=None, project=None, kind="both", since=None, until=None, limit=20)`.
 
 - **Without a query**, it lists records by `source_end`, newest first.
-  This is the timeline browse.
+  This is the timeline browse. When older records remain, the page ends
+  with `Older: search_episodic(..., until="<timestamp>")`, which repeats
+  the filters that were set and lists the page before. Observations from
+  one extraction window share their `source_end`, so a page that would
+  split such a group stops before it and the group opens the next page
+  whole; only a group larger than the page is cut.
 - **With a query**, it runs a fulltext leg on `episode_text`, with the
   query escaped for Lucene. When embeddings are configured, it also runs
   one vector leg, a Cypher 25 `SEARCH` over `episode_embedding`. Both legs
   filter by `project_id` before keeping their best matches, so other
   projects' records cannot crowd this project's out: the fulltext leg in
-  its `WHERE`, the vector leg inside the index. `since` and kind are not
+  its `WHERE`, the vector leg inside the index. The time bounds and kind are not
   index properties, so the vector leg applies them to its nearest nodes
   and over-fetches, taking about five times `limit`. The same Cypher
   query merges the legs, as in the chapter's listing: each leg divides
@@ -594,8 +599,10 @@ The signature follows the chapter:
   Prompt-time recall merges its legs the same way in Python, because it
   filters fulltext candidates by shared words first.
 - **Parameters.** `project` defaults to the current project. `since`
-  accepts an ISO date or a relative span such as `7d`, and filters on
-  `source_end`. `limit` is clamped to 1–50.
+  and `until` accept an ISO date or a relative span such as `7d`, and
+  filter on `source_end` as a half-open window: `since` inclusive,
+  `until` exclusive, so adjacent windows neither overlap nor leave a gap.
+  `limit` is clamped to 1–50.
 - **Output** is capped at about 6,000 characters.
 
 ### 6.4 expand_episodic

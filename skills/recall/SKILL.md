@@ -15,7 +15,9 @@ when a detail that matters is still unresolved:
 
 1. Overview. Start from the recap rows and `search_episodic` results:
    titles and ids. Call `search_episodic` without a query to browse recent
-   work, or with a query to find related work.
+   work, or with a query to find related work. To go further back, run
+   the `Older:` call that ends a full page, or set `since` and `until`
+   (an ISO date or a span such as `7d`) to read one stretch of time.
 2. Episode. Open only the ids that look relevant with `expand_episodic`. A
    session id opens its handoff: request, progress, and outcome. An
    observation id opens its narrative, with its neighbors and source

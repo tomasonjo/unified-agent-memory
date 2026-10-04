@@ -294,12 +294,17 @@ The hooks are a push channel: the record flows out because events fire.
 loads the same canonical env file (exported variables win, whitelist
 only). It announces four tools:
 
-- **`search_episodic(query?, project?, kind?, since?, limit?)`** returns
-  one-line rows for episodic records, best match first, or the newest when
-  there is no query. A record is either an observation (one finding, fix,
-  or decision) or a session summary (where a session's work stands). A
-  row reads like
+- **`search_episodic(query?, project?, kind?, since?, until?, limit?)`**
+  returns one-line rows for episodic records, best match first, or the
+  newest when there is no query. A record is either an observation (one
+  finding, fix, or decision) or a session summary (where a session's work
+  stands). A row reads like
   `#o112 · discovery · yesterday · Renewal drop traced to March pipeline change`.
+  `since` and `until` take an ISO date or a span such as `7d` and bound a
+  half-open window, so `since="14d", until="7d"` is the week before last.
+  Without a query, a full page ends with an `Older: search_episodic(...)`
+  line that lists the page before it, which is how the agent walks back
+  through the project timeline.
 - **`expand_episodic(id, events?, cursor?)`** opens one row. An
   observation comes with its narrative, timeline neighbors, and source
   session. A session comes with its current summary and its observations.

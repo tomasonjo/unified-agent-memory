@@ -37,7 +37,7 @@ KINDS = ("observation", "session", "both")
 
 MAX_SEARCH_LIMIT = 50
 # Each leg hands fusion this many candidates per wanted row. The
-# vector index filters by project as it searches, but the since and kind
+# vector index filters by project as it searches, but the time and kind
 # filters apply to its nearest nodes afterwards, so a vector leg
 # over-fetches by this factor; the fulltext leg filters first and keeps
 # its best this many.
@@ -255,8 +255,10 @@ _SPAN = re.compile(r"(\d+)\s*([hdw])", re.IGNORECASE)
 _SPAN_UNITS = {"h": "hours", "d": "days", "w": "weeks"}
 
 
-def parse_since(value: str | None, now: datetime | None = None) -> str | None:
-    """``since`` as an ISO timestamp.
+def parse_time(
+    value: str | None, name: str = "since", now: datetime | None = None
+) -> str | None:
+    """A ``since`` or ``until`` bound as an ISO timestamp.
 
     Accepts an ISO date or datetime, or a span back from now such as 12h,
     7d, or 2w. Raises ValueError for anything else, so the caller can say
@@ -273,7 +275,7 @@ def parse_since(value: str | None, now: datetime | None = None) -> str | None:
         when = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         raise ValueError(
-            f"since must be an ISO date or a span such as 7d, not {value!r}"
+            f"{name} must be an ISO date or a span such as 7d, not {value!r}"
         ) from None
     return (when if when.tzinfo else when.replace(tzinfo=timezone.utc)).isoformat()
 
@@ -356,8 +358,11 @@ ROW_FIELDS = """
        node.id AS key"""
 
 # A project filter organizes retrieval; it is not an authorization check.
+# The time bounds are half-open, since inclusive and until exclusive, so
+# adjacent windows neither overlap nor leave a gap.
 FILTERS = """($project IS NULL OR node.project_id = $project)
   AND ($since IS NULL OR node.source_end >= datetime($since))
+  AND ($until IS NULL OR node.source_end < datetime($until))
   AND ($kind = 'both'
        OR ($kind = 'observation' AND node:Observation)
        OR ($kind = 'session' AND node:SessionSummary))"""
@@ -436,16 +441,43 @@ def _when(row: dict) -> datetime:
     return _native(row.get("source_end")) or datetime.min.replace(tzinfo=timezone.utc)
 
 
-def recent(run, project, kind="both", since=None, limit=20) -> list[dict]:
-    """The newest rows by ``source_end``: the timeline browse."""
-    params = {"project": project, "kind": kind, "since": since, "limit": limit}
+def recent(
+    run, project, kind="both", since=None, until=None, limit=20
+) -> tuple[list[dict], str | None]:
+    """The newest rows by ``source_end``: the timeline browse.
+
+    Returns the rows and, when older ones remain, the ``until`` that lists
+    the page before them. Records from one extraction window share their
+    ``source_end``, so a page does not end partway through such a group:
+    the group moves to the next page whole. Only a group that fills a page
+    by itself is cut, and the rest of it is skipped.
+    """
+    params = {
+        "project": project, "kind": kind, "since": since, "until": until,
+        "limit": limit + 1,
+    }
     rows: list[dict] = []
     if kind in ("observation", "both"):
         rows += run(RECENT_OBSERVATIONS, **params)
     if kind in ("session", "both"):
         rows += run(RECENT_SUMMARIES, **params)
     rows.sort(key=_when, reverse=True)
-    return rows[:limit]
+    if len(rows) <= limit:
+        return rows, None
+    boundary = _when(rows[limit])
+    page = [row for row in rows[:limit] if _when(row) > boundary] or rows[:limit]
+    oldest = _native(page[-1].get("source_end"))
+    return page, oldest.isoformat() if oldest else None
+
+
+def older_call(until: str, **filters) -> str:
+    """The ``search_episodic`` call that lists the page before a browse."""
+    args = [
+        f"{name}={value}" if isinstance(value, int) else f'{name}="{value}"'
+        for name, value in {**filters, "until": until}.items()
+        if value is not None
+    ]
+    return f"Older: search_episodic({', '.join(args)})"
 
 
 def fuse(legs: list[list[dict]]) -> list[dict]:
@@ -492,21 +524,22 @@ def _leg(run, cypher: str, **params) -> list[dict]:
 
 
 def hybrid_search(
-    run, query, vector, project, kind="both", since=None, limit=20
-) -> list[dict]:
+    run, query, vector, project, kind="both", since=None, until=None, limit=20
+) -> tuple[list[dict], str | None]:
     """Rows matching ``query`` (and ``vector``), best first.
 
-    Without a query this is the recency listing. With one, the fulltext
-    leg searches both kinds in a single call, the vector index adds a leg
-    when a query vector is given, and the same query merges their
-    normalized scores.
+    Without a query this is the recency listing, returned with the
+    ``until`` that pages back past it. With one, the fulltext leg searches
+    both kinds in a single call, the vector index adds a leg when a query
+    vector is given, and the same query merges their normalized scores;
+    ranked rows have no older page, so the second value is None.
     """
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {', '.join(KINDS)}, not {kind!r}")
     limit = max(1, min(int(limit), MAX_SEARCH_LIMIT))
     text = lucene_query(query)
     if not text and vector is None:
-        return recent(run, project, kind, since, limit)
+        return recent(run, project, kind, since, until, limit)
     branches = []
     if text:
         branches.append(FULLTEXT_BRANCH)
@@ -514,9 +547,9 @@ def hybrid_search(
         branches.append(vector_branch(project is not None))
     return _fused(
         run, branches, index=FULLTEXT_INDEX, text=text, vector=vector,
-        project=project, kind=kind, since=since, limit=limit,
+        project=project, kind=kind, since=since, until=until, limit=limit,
         candidates=limit * CANDIDATES_PER_ROW,
-    )
+    ), None
 
 
 # --- expand -------------------------------------------------------------------

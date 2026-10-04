@@ -62,11 +62,11 @@ def test_one_vector_index_replaces_the_per_label_ones(indexed):
 
 def test_the_project_filter_runs_inside_the_index(indexed):
     run = episodes.reader(indexed.session)
-    rows = episodes.hybrid_search(run, None, QUERY, PROJECT, limit=1)
+    rows, _ = episodes.hybrid_search(run, None, QUERY, PROJECT, limit=1)
     assert [row["display_id"] for row in rows] == ["o1"]
-    rows = episodes.hybrid_search(run, None, QUERY, PROJECT, kind="session")
+    rows, _ = episodes.hybrid_search(run, None, QUERY, PROJECT, kind="session")
     assert [row["display_id"] for row in rows] == ["s1"]
-    rows = episodes.hybrid_search(run, None, QUERY, None, limit=1)
+    rows, _ = episodes.hybrid_search(run, None, QUERY, None, limit=1)
     assert [row["display_id"] for row in rows] == ["o101"]
 
 
@@ -80,7 +80,7 @@ def test_related_recall_reads_the_same_index(indexed):
 def test_both_legs_are_fused_in_one_query(indexed):
     run = episodes.reader(indexed.session)
     # Only o1's title says "pipeline"; the vector leg finds s1 as well.
-    rows = episodes.hybrid_search(run, "pipeline", QUERY, PROJECT)
+    rows, _ = episodes.hybrid_search(run, "pipeline", QUERY, PROJECT)
     assert [row["display_id"] for row in rows] == ["o1", "s1"]
     # Each leg's best scores 1.0 once divided by that leg's best score.
     assert rows[0]["score"] == 1.0
@@ -90,5 +90,18 @@ def test_both_legs_are_fused_in_one_query(indexed):
 def test_a_missing_vector_index_costs_only_its_leg(indexed):
     indexed.session.run(f"DROP INDEX {episodes.VECTOR_INDEX}").consume()
     run = episodes.reader(indexed.session)
-    rows = episodes.hybrid_search(run, "pipeline", QUERY, PROJECT)
+    rows, _ = episodes.hybrid_search(run, "pipeline", QUERY, PROJECT)
     assert [row["display_id"] for row in rows] == ["o1"]
+
+
+def test_ranked_search_honors_the_time_bounds(indexed):
+    run = episodes.reader(indexed.session)
+    rows, older = episodes.hybrid_search(
+        run, "pipeline", QUERY, PROJECT, until="2100-01-01T00:00:00+00:00"
+    )
+    assert [row["display_id"] for row in rows] == ["o1", "s1"]
+    assert older is None
+    rows, _ = episodes.hybrid_search(
+        run, "pipeline", QUERY, PROJECT, until=episodes.parse_time("1d", "until")
+    )
+    assert rows == []

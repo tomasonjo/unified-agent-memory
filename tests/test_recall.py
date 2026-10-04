@@ -181,7 +181,8 @@ def test_a_recap_title_does_not_block_opening_the_record(maria_worked):
 def test_a_subagents_search_does_not_count_for_the_main_context(maria_worked):
     graph = maria_worked
     capture("s-analyst", "SessionStart", source="startup")
-    rows = episodes.render_rows(episodes.recent(episodes.reader(graph.session), PROJECT))
+    page, _ = episodes.recent(episodes.reader(graph.session), PROJECT)
+    rows = episodes.render_rows(page)
     recall.tool_delivery(graph.session, {
         "session_id": "s-analyst", "hook_event_name": "PostToolUse", "cwd": str(ROOT),
         "tool_name": "mcp__plugin_unified-agent-memory_memory__search_episodic",
