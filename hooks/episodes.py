@@ -37,9 +37,10 @@ KINDS = ("observation", "session", "both")
 
 MAX_SEARCH_LIMIT = 50
 # Each leg hands rank fusion this many candidates per wanted row. The
-# vector procedure returns its nearest nodes before the project, since,
-# and kind filters can apply, so a vector leg over-fetches by this
-# factor; the fulltext leg filters first and keeps its best this many.
+# vector index filters by project as it searches, but the since and kind
+# filters apply to its nearest nodes afterwards, so a vector leg
+# over-fetches by this factor; the fulltext leg filters first and keeps
+# its best this many.
 CANDIDATES_PER_ROW = 5
 RRF_K = 60
 
@@ -52,10 +53,9 @@ OBSERVATION_PAGE = 20
 EVENT_PAGE = 20
 
 FULLTEXT_INDEX = "episode_text"
-VECTOR_INDEXES = {
-    "observation": ("observation_embedding", "Observation"),
-    "session": ("summary_embedding", "SessionSummary"),
-}
+VECTOR_INDEX = "episode_embedding"
+# One index per label, from before vector indexes could span labels.
+LEGACY_VECTOR_INDEXES = ["observation_embedding", "summary_embedding"]
 
 
 def reader(session):
@@ -84,9 +84,12 @@ FULLTEXT_FIELDS = [
     "title", "narrative", "headline", "request", "progress", "outcome",
 ]
 
+# project_id is a filter property, so a search can filter by project
+# inside the index instead of after it (Neo4j 2026.01 or later).
 VECTOR_INDEX_QUERY = """
-CREATE VECTOR INDEX {name} IF NOT EXISTS
-FOR (n:{label}) ON (n.embedding)
+CREATE VECTOR INDEX episode_embedding IF NOT EXISTS
+FOR (n:Observation|SessionSummary) ON n.embedding
+WITH [n.project_id]
 OPTIONS {{indexConfig: {{
   `vector.dimensions`: {dimensions},
   `vector.similarity_function`: 'cosine'}}}}
@@ -152,28 +155,22 @@ def ensure_episode_schema(session) -> None:
 def ensure_retrieval_indexes(session, dimensions: int | None = None) -> None:
     """Create the retrieval indexes that are missing, then wait for them.
 
-    The fulltext index spans both labels, so one call searches
-    observations and summaries together. A vector index binds to a single
-    label, so each kind gets its own, and only when an embedding model is
-    configured; ``dimensions`` must match that model. Each statement runs
-    on its own, because schema commands do not compose into one
-    transaction. Failures are reported rather than raised: search skips a
-    leg whose index is missing. ``IF NOT EXISTS`` never updates an
+    Both indexes span both labels, so one call searches observations and
+    summaries together. The vector index exists only when an embedding
+    model is configured; ``dimensions`` must match that model. Each
+    statement runs on its own, because schema commands do not compose
+    into one transaction. Failures are reported rather than raised: search
+    skips a leg whose index is missing. ``IF NOT EXISTS`` never updates an
     existing definition, so a fulltext index over other fields is dropped
-    first and rebuilt.
+    first and rebuilt, and the older per-label vector indexes are dropped.
     """
     _drop_stale_fulltext(session)
     statements = [(FULLTEXT_INDEX, FULLTEXT_INDEX_QUERY)]
     if dimensions:
-        for name, label in VECTOR_INDEXES.values():
-            statements.append(
-                (
-                    name,
-                    VECTOR_INDEX_QUERY.format(
-                        name=name, label=label, dimensions=int(dimensions)
-                    ),
-                )
-            )
+        _drop_legacy_vector(session)
+        statements.append(
+            (VECTOR_INDEX, VECTOR_INDEX_QUERY.format(dimensions=int(dimensions)))
+        )
     for name, statement in statements:
         try:
             session.run(statement).consume()
@@ -193,6 +190,18 @@ def _drop_stale_fulltext(session) -> None:
             session.run(f"DROP INDEX {FULLTEXT_INDEX} IF EXISTS").consume()
     except Exception as exc:
         print(f"[uam] index {FULLTEXT_INDEX} not checked: {exc}", file=sys.stderr)
+
+
+def _drop_legacy_vector(session) -> None:
+    try:
+        names = session.run(
+            "SHOW VECTOR INDEXES YIELD name WHERE name IN $names RETURN name",
+            names=LEGACY_VECTOR_INDEXES,
+        ).value()
+        for name in names:
+            session.run(f"DROP INDEX {name} IF EXISTS").consume()
+    except Exception as exc:
+        print(f"[uam] legacy vector indexes not checked: {exc}", file=sys.stderr)
 
 
 # --- formatting ---------------------------------------------------------------
@@ -368,24 +377,58 @@ RECENT_SUMMARIES = _RECENT.format(
     label="SessionSummary", filters=FILTERS, fields=ROW_FIELDS
 )
 
-FULLTEXT_LEG = f"""
+# A SEARCH filter accepts only AND-joined predicates on the index's filter
+# properties, so a search without a project leaves the filter out rather
+# than testing $project for null. SEARCH is Cypher 25, so a query that
+# uses it starts with the CYPHER 25 prefix.
+_VECTOR_SEARCH = """MATCH (node:Observation|SessionSummary)
+  SEARCH node IN (
+    VECTOR INDEX episode_embedding
+    FOR $vector
+    {where}LIMIT $candidates
+  ) SCORE AS score
+"""
+IN_PROJECT = "WHERE node.project_id = $project\n    "
+
+
+def vector_search(in_project: bool) -> str:
+    """The nearest episodes to ``$vector``, within ``$project`` if ``in_project``."""
+    return _VECTOR_SEARCH.format(where=IN_PROJECT if in_project else "")
+
+
+# Each leg of the fused search returns its nodes as one list, best first.
+FULLTEXT_BRANCH = f"""
 CALL db.index.fulltext.queryNodes($index, $text)
 YIELD node, score
 WHERE {FILTERS}
-WITH node, score ORDER BY score DESC LIMIT $candidates
+WITH node ORDER BY score DESC LIMIT $candidates
+RETURN collect(node) AS ranked"""
+
+
+def vector_branch(in_project: bool) -> str:
+    return "\n" + vector_search(in_project) + f"""WHERE {FILTERS}
+WITH node ORDER BY score DESC
+RETURN collect(node) AS ranked"""
+
+
+# Reciprocal rank fusion in the query: each position in a leg's list is
+# worth 1 / (k + rank), and a node's shares from all legs are summed.
+_FUSED_SEARCH = """CYPHER 25
+CALL () {{{branches}
+}}
+UNWIND range(1, size(ranked)) AS rank
+WITH ranked[rank - 1] AS node, 1.0 / ($rrf_k + rank) AS share
+WITH node, sum(share) AS score
+ORDER BY score DESC LIMIT $limit
 OPTIONAL MATCH (s:Session)-[:HAS_SUMMARY]->(node)
-RETURN {ROW_FIELDS}, score
+RETURN {fields}, score
 ORDER BY score DESC
 """
 
-VECTOR_LEG = f"""
-CALL db.index.vector.queryNodes($index, $candidates, $vector)
-YIELD node, score
-WHERE {FILTERS}
-OPTIONAL MATCH (s:Session)-[:HAS_SUMMARY]->(node)
-RETURN {ROW_FIELDS}, score
-ORDER BY score DESC
-"""
+
+def fused_search(branches: list[str]) -> str:
+    """One query that runs ``branches`` and fuses their lists by rank."""
+    return _FUSED_SEARCH.format(branches="\nUNION ALL".join(branches), fields=ROW_FIELDS)
 
 
 def _when(row: dict) -> datetime:
@@ -421,6 +464,21 @@ def fuse(legs: list[list[dict]], k: int = RRF_K) -> list[dict]:
     return sorted(rows.values(), key=lambda row: -scores[row["key"]])
 
 
+def _fused(run, branches: list[str], **params) -> list[dict]:
+    """The fused search, or the first leg that runs alone if it fails.
+
+    A missing index, or a server without SEARCH, then costs its own leg
+    rather than the search.
+    """
+    attempts = [branches] + ([[branch] for branch in branches] if len(branches) > 1 else [])
+    for attempt in attempts:
+        try:
+            return run(fused_search(attempt), **params)
+        except Exception as exc:
+            print(f"[uam] search legs skipped: {exc}", file=sys.stderr)
+    return []
+
+
 def _leg(run, cypher: str, **params) -> list[dict]:
     try:
         return run(cypher, **params)
@@ -435,8 +493,9 @@ def hybrid_search(
     """Rows matching ``query`` (and ``vector``), best first.
 
     Without a query this is the recency listing. With one, the fulltext
-    leg searches both kinds in a single call, each vector index adds a leg
-    when a query vector is given, and reciprocal rank fusion merges them.
+    leg searches both kinds in a single call, the vector index adds a leg
+    when a query vector is given, and reciprocal rank fusion merges them
+    in the same query.
     """
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {', '.join(KINDS)}, not {kind!r}")
@@ -444,20 +503,16 @@ def hybrid_search(
     text = lucene_query(query)
     if not text and vector is None:
         return recent(run, project, kind, since, limit)
-    params = {
-        "project": project,
-        "kind": kind,
-        "since": since,
-        "candidates": limit * CANDIDATES_PER_ROW,
-    }
-    legs = []
+    branches = []
     if text:
-        legs.append(_leg(run, FULLTEXT_LEG, index=FULLTEXT_INDEX, text=text, **params))
+        branches.append(FULLTEXT_BRANCH)
     if vector is not None:
-        for leg_kind, (index, _label) in VECTOR_INDEXES.items():
-            if kind in (leg_kind, "both"):
-                legs.append(_leg(run, VECTOR_LEG, index=index, vector=vector, **params))
-    return fuse(legs)[:limit]
+        branches.append(vector_branch(project is not None))
+    return _fused(
+        run, branches, index=FULLTEXT_INDEX, text=text, vector=vector,
+        project=project, kind=kind, since=since, limit=limit,
+        candidates=limit * CANDIDATES_PER_ROW, rrf_k=RRF_K,
+    )
 
 
 # --- expand -------------------------------------------------------------------
@@ -840,8 +895,10 @@ RELATED_FULLTEXT = (
     f"WHERE {_RELATED_FILTERS}" + _RELATED_TAIL
 )
 RELATED_VECTOR = (
-    "CALL db.index.vector.queryNodes($index, $candidates, $vector)\n"
-    f"YIELD node, score\nWHERE {_RELATED_FILTERS}" + _RELATED_TAIL
+    "CYPHER 25\n"
+    + vector_search(in_project=True)
+    + "WHERE node.session_id <> $session_id AND score >= $floor"
+    + _RELATED_TAIL
 )
 
 DELIVERED = """
@@ -1101,7 +1158,7 @@ def related(
     The same legs as ``hybrid_search``, restricted to the project and to
     other sessions' records, with each leg's candidates cut at its floor
     before rank fusion: shared words for the fulltext leg, similarity for
-    the vector legs. No candidate above a floor means no rows.
+    the vector leg. No candidate above a floor means no rows.
     """
     terms = prompt_terms(prompt)
     params = {
@@ -1122,11 +1179,10 @@ def related(
         )
         legs.append([row for row in rows if shared_terms(terms, row["searchable"]) >= needed])
     if vector is not None:
-        for index, _label in VECTOR_INDEXES.values():
-            legs.append(
-                _leg(run, RELATED_VECTOR, index=index, vector=vector,
-                     floor=vector_floor, **params)
-            )
+        legs.append(
+            _leg(run, RELATED_VECTOR, index=VECTOR_INDEX, vector=vector,
+                 floor=vector_floor, **params)
+        )
     return fuse([leg for leg in legs if leg])[:limit]
 
 

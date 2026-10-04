@@ -81,9 +81,13 @@ The schema uses named constraints and indexes, like chapter 2's:
   `SessionSummary.id`, `ExtractionRun.id`, and `DisplayIdCounter.prefix`.
 - A fulltext index, `episode_text`, over `Observation|SessionSummary` on
   the eight text fields in the chapter's index listing.
-- Vector indexes `observation_embedding` and `summary_embedding`, created
-  only when an embedding model is configured and sized by
-  `UAM_EMBEDDING_DIMENSIONS`.
+- A vector index, `episode_embedding`, over `Observation|SessionSummary`
+  on `embedding`, with `project_id` as a filter property. It is created
+  only when an embedding model is configured, sized by
+  `UAM_EMBEDDING_DIMENSIONS`, and needs Neo4j 2026.01 or later; on an
+  older server its creation fails and search runs on fulltext alone. The
+  per-label `observation_embedding` and `summary_embedding` it replaces
+  are dropped when found.
 - Composite range indexes on `(project_id, source_end)` for both artifact
   labels (`uam_observation_recency`, `uam_summary_recency`), to serve
   recency listings.
@@ -576,12 +580,17 @@ The signature follows the chapter:
   This is the timeline browse.
 - **With a query**, it runs a fulltext leg on `episode_text`, with the
   query escaped for Lucene. When embeddings are configured, it also runs
-  one vector leg per requested kind. The fulltext leg filters by
-  `project_id`, `since`, and kind before keeping its best matches, so
-  other projects' records cannot crowd this project's out. The vector
-  procedure returns its nearest nodes before any filter applies, so each
-  vector leg over-fetches, taking about five times `limit`. Reciprocal
-  rank fusion with k = 60 merges the legs.
+  one vector leg, a Cypher 25 `SEARCH` over `episode_embedding`. Both legs
+  filter by `project_id` before keeping their best matches, so other
+  projects' records cannot crowd this project's out: the fulltext leg in
+  its `WHERE`, the vector leg inside the index. `since` and kind are not
+  index properties, so the vector leg applies them to its nearest nodes
+  and over-fetches, taking about five times `limit`. Reciprocal rank
+  fusion with k = 60 merges the legs in the same Cypher query, as in the
+  chapter's listing. If that query fails, the first leg that runs alone
+  answers, so a missing index costs only its own leg. Prompt-time recall
+  still fuses in Python, because it filters fulltext candidates by
+  shared words before fusing.
 - **Parameters.** `project` defaults to the current project. `since`
   accepts an ISO date or a relative span such as `7d`, and filters on
   `source_end`. `limit` is clamped to 1–50.
@@ -762,9 +771,9 @@ delivered blocks are on their events.
    another application's observations never reach a recap or a prompt, but
    `search_episodic` filters by project only and would return that
    application's observations for a project id they share. The other
-   vector index does not block `observation_embedding` (checked on
-   2026.08: its filter properties make it a different schema), but it
-   would index this plugin's embeddings too. Capture now MERGEs `User` and
+   vector index does not block `episode_embedding` (checked on 2026.08:
+   both have filter properties, but over different label sets), but it
+   would index this plugin's observation embeddings too. Capture now MERGEs `User` and
    `Project` anchors and consolidation writes `Observation` nodes, so
    point `NEO4J_DATABASE` at a database dedicated to memory before
    enabling the hooks.
