@@ -15,8 +15,8 @@ One script, three entry points, chosen by the hook event:
 - ``UserPromptSubmit``: up to three episodes from other sessions that the
   prompt is likely about. A candidate must clear a relevance floor, so an
   unrelated prompt receives nothing.
-- ``PostToolUse`` on the memory server's ``search`` and ``expand``: records
-  what those tools returned, so the delivery record covers what the agent
+- ``PostToolUse`` on the memory server's ``search_episodic`` and
+  ``expand_episodic``: records what those tools returned, so the delivery record covers what the agent
   opened itself, not only what hooks pushed.
 
 Every delivery is recorded on the event that carried it (the exact block,
@@ -57,9 +57,10 @@ from log_event import build_event_props  # noqa: E402
 # configured. The hook timeouts in hooks.json are only a backstop.
 BUDGETS = {"SessionStart": 5.0, "UserPromptSubmit": 3.0, "PostToolUse": 5.0}
 FINALIZE_SECONDS = 2.0
-# mcp__plugin_unified-agent-memory_memory__search as a plugin server;
-# mcp__memory__search when the same server is configured directly.
-MEMORY_TOOL = re.compile(r"_memory__(search|expand)$")
+# mcp__plugin_unified-agent-memory_memory__search_episodic as a plugin
+# server; mcp__memory__search_episodic when the same server is configured
+# directly. The delivery channel is the verb: search or expand.
+MEMORY_TOOL = re.compile(r"_memory__(search|expand)_episodic$")
 _LEADING_ID = re.compile(r"^#([os]\d+)\b")
 
 
@@ -177,10 +178,10 @@ def response_text(response) -> str:
 
 
 def tool_delivery(db, payload: dict) -> None:
-    """Record what ``search`` or ``expand`` returned to the agent.
+    """Record what ``search_episodic`` or ``expand_episodic`` returned.
 
-    ``search`` rows are titles. ``expand`` opened one record in full, the
-    one its response leads with, unless it paged source events; its
+    ``search_episodic`` rows are titles. ``expand_episodic`` opened one
+    record in full, the one its response leads with, unless it paged source events; its
     neighbor rows are titles. A subagent's context is its own, so its
     deliveries are recorded but never suppress the main context's.
     """

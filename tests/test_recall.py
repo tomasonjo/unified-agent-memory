@@ -160,7 +160,7 @@ def test_a_recap_title_does_not_block_opening_the_record(maria_worked):
     opened = episodes.expand(episodes.reader(graph.session), "#o1")
     recall.tool_delivery(graph.session, {
         "session_id": "s-analyst", "hook_event_name": "PostToolUse", "cwd": str(ROOT),
-        "tool_name": "mcp__plugin_unified-agent-memory_memory__expand",
+        "tool_name": "mcp__plugin_unified-agent-memory_memory__expand_episodic",
         "tool_input": {"id": "#o1"}, "tool_use_id": "toolu_expand",
         "tool_response": [{"type": "text", "text": opened}],
     })
@@ -184,7 +184,7 @@ def test_a_subagents_search_does_not_count_for_the_main_context(maria_worked):
     rows = episodes.render_rows(episodes.recent(episodes.reader(graph.session), PROJECT))
     recall.tool_delivery(graph.session, {
         "session_id": "s-analyst", "hook_event_name": "PostToolUse", "cwd": str(ROOT),
-        "tool_name": "mcp__plugin_unified-agent-memory_memory__search",
+        "tool_name": "mcp__plugin_unified-agent-memory_memory__search_episodic",
         "tool_input": {}, "tool_use_id": "toolu_search", "agent_id": "a1",
         "agent_type": "Explore", "tool_response": rows,
     })

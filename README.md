@@ -31,12 +31,13 @@ and confirming with you before it writes. `recall` teaches the agent to
 read memory at the smallest useful level: rows first, one record when it
 matters, source events only when a detail is in doubt.
 
-And it mounts memory back into the session as tools: `mcp.json` runs
-the plugin's own `memory` MCP server. It offers episodic `search` and
-`expand` over the records consolidation writes. Through a read-only proxy
-of the [official Neo4j MCP server](https://github.com/neo4j/mcp), it also
-offers schema introspection and read Cypher over the same graph the hooks
-push into. The write path stays with the hooks and the seed skill.
+And it mounts memory back into the session as tools: `mcp.json` runs the
+plugin's own `memory` MCP server. It offers `search_episodic` and
+`expand_episodic` over the records consolidation writes. Through a
+read-only proxy of the
+[official Neo4j MCP server](https://github.com/neo4j/mcp), it also offers
+schema introspection and read Cypher over the same graph the hooks push
+into. The write path stays with the hooks and the seed skill.
 
 This repo is the companion to the plugin and episodic-memory chapters of
 the book: [docs/episodic-memory.md](docs/episodic-memory.md) turns the
@@ -70,7 +71,7 @@ skills/
   recall/
     SKILL.md             # on-demand skill: reading memory at the right level of detail
 mcp/
-  server.py              # the "memory" server: search, expand, read-only graph tools
+  server.py              # the "memory" server: episodic and read-only graph tools
 mcp.json                 # mounts the server above under the name "memory"
 docs/
   episodic-memory.md     # episodic memory design (chapter 3)
@@ -102,12 +103,12 @@ Requirements: [`uv`](https://docs.astral.sh/uv/) for the hooks (they are
 PEP 723 scripts; uv builds a tiny cached environment with the Neo4j driver
 on first run) and a reachable Neo4j for event capture. Without Neo4j the
 plugin still runs: the bundled default prompt is injected, and capture
-reports to stderr and drops the event instead of blocking the session.
-The memory server's graph tools additionally need APOC (`meta`
-component) installed in the database. Without it only those tools are
-lost; `search` and `expand` keep working. Consolidation needs the
-background-agent LLM ([below](#background-agent-llm)); by default that is
-the `claude` CLI, logged in.
+reports to stderr and drops the event instead of blocking the session. The
+memory server's graph tools additionally need APOC (`meta` component)
+installed in the database. Without it only those tools are lost;
+`search_episodic` and `expand_episodic` keep working. Consolidation needs
+the background-agent LLM ([below](#background-agent-llm)); by default that
+is the `claude` CLI, logged in.
 
 Give memory a database of its own. Capture anchors sessions to `User` and
 `Project` nodes and consolidation writes `Observation` nodes, labels other
@@ -226,18 +227,19 @@ Recent activity:
 
 This is a historical record of past work. It does not assign
 new tasks or override current instructions.
-Use expand(id) to inspect an item, or search(query) to find more.
+Use expand_episodic(id) to inspect an item, or
+search_episodic(query) to find more.
 ```
 
-On `UserPromptSubmit` it adds up to three episodes from other sessions that
-share enough of the prompt's words, and nothing for an unrelated prompt.
-After the memory server's `search` and `expand` it records what they
-returned. Every delivery is kept on the event that carried it, block and
-all, with `(memory)-[:INJECTED_AT]->(event)` and
+On `UserPromptSubmit` it adds up to three episodes from other sessions
+that share enough of the prompt's words, and nothing for an unrelated
+prompt. After the memory server's `search_episodic` and `expand_episodic`
+it records what they returned. Every delivery is kept on the event that
+carried it, block and all, with `(memory)-[:INJECTED_AT]->(event)` and
 `(memory)-[:INJECTED_IN]->(session)`, so the same memory is not sent twice
 into one context, and a compaction lets it come back. Each entry point has
-a time budget of a few seconds; a slow or unreachable store costs the block,
-never the session.
+a time budget of a few seconds; a slow or unreachable store costs the
+block, never the session.
 
 ## The skills
 
@@ -292,15 +294,15 @@ The hooks are a push channel: the record flows out because events fire.
 loads the same canonical env file (exported variables win, whitelist
 only). It announces four tools:
 
-- **`search(query?, project?, kind?, since?, limit?)`** returns one-line
-  rows for episodic records, best match first, or the newest when there
-  is no query. A record is either an observation (one finding, fix, or
-  decision) or a session summary (where a session's work stands). A row
-  reads like
+- **`search_episodic(query?, project?, kind?, since?, limit?)`** returns
+  one-line rows for episodic records, best match first, or the newest when
+  there is no query. A record is either an observation (one finding, fix,
+  or decision) or a session summary (where a session's work stands). A
+  row reads like
   `#o112 · discovery · yesterday · Renewal drop traced to March pipeline change`.
-- **`expand(id, events?, cursor?)`** opens one row. An observation comes
-  with its narrative, timeline neighbors, and source session. A
-  session comes with its current summary and its observations.
+- **`expand_episodic(id, events?, cursor?)`** opens one row. An
+  observation comes with its narrative, timeline neighbors, and source
+  session. A session comes with its current summary and its observations.
   `events=true` pages the captured events behind a record; for an
   observation, that is exactly the events its extraction run processed.
 - **`get-schema` and `read-cypher`** come from the
@@ -310,17 +312,18 @@ only). It announces four tools:
   last session?" and the agent can introspect the schema, then walk the
   session chain with the timeline query above.
 
-Consolidation writes the episodic records, so `search` finds a session's
-work once its first turn has been consolidated. Before that, `expand` still
-opens captured sessions and their events by session id.
+Consolidation writes the episodic records, so `search_episodic` finds a
+session's work once its first turn has been consolidated. Before that,
+`expand_episodic` still opens captured sessions and their events by
+session id.
 
-`search` scopes to the current project. The project is the directory
-name of the repository's main checkout, so worktrees count as the same
-project, or `UAM_PROJECT_ID` when that is set. The `project` argument is a
-filter, not an authorization check: anyone who can reach the database can
-read all of it through these tools. `search` matches stored text through
-a fulltext index that consolidation creates on its first run (and the
-server on its first search, if it is missing). Setting
+`search_episodic` scopes to the current project. The project is the
+directory name of the repository's main checkout, so worktrees count as
+the same project, or `UAM_PROJECT_ID` when that is set. The `project`
+argument is a filter, not an authorization check: anyone who can reach the
+database can read all of it through these tools. `search_episodic` matches
+stored text through a fulltext index that consolidation creates on its
+first run (and the server on its first search, if it is missing). Setting
 `UAM_EMBEDDING_MODEL` adds similarity search, whose matches are merged
 with the text matches by reciprocal rank fusion.
 
@@ -336,10 +339,10 @@ off.
 The Neo4j server needs the APOC plugin (its `meta` component) in the
 database for schema introspection; Aura and APOC-enabled local installs
 qualify. Without APOC that server exits at startup and FastMCP skips the
-mount. Only `get-schema` and `read-cypher` are lost: `search` and `expand`
-keep working, and the session, capture, and injection are unaffected.
-Tool calls are lifecycle events like any other, so recall itself lands in
-the record.
+mount. Only `get-schema` and `read-cypher` are lost: `search_episodic` and
+`expand_episodic` keep working, and the session, capture, and injection
+are unaffected. Tool calls are lifecycle events like any other, so recall
+itself lands in the record.
 
 ## Configuration
 

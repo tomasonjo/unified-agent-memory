@@ -8,20 +8,21 @@ description: How to read project memory with the memory tools, from short rows t
 Project memory holds two kinds of record, written by consolidation after
 each turn: observations (`#o…`, one finding, fix, or decision each) and
 session summaries (`#s…`, where a session's work stands). The session-start
-recap and the rows `search` returns name them by id.
+recap and the rows `search_episodic` returns name them by id.
 
 Read at the smallest level that answers the question, and open more only
 when a detail that matters is still unresolved:
 
-1. Overview. Start from the recap rows and `search` results: titles and
-   ids. Call `search` without a query to browse recent work, or with a
-   query to find related work.
-2. Episode. `expand` only the ids that look relevant. A session id opens
-   its handoff: request, progress, and outcome. An observation
-   id opens its narrative, with its neighbors and source session.
-3. Source. `expand(id, events=true)` pages the captured events behind a
-   record. Open them only when an important detail is uncertain, such as
-   what was actually run or what was reported as the outcome.
+1. Overview. Start from the recap rows and `search_episodic` results:
+   titles and ids. Call `search_episodic` without a query to browse recent
+   work, or with a query to find related work.
+2. Episode. Open only the ids that look relevant with `expand_episodic`. A
+   session id opens its handoff: request, progress, and outcome. An
+   observation id opens its narrative, with its neighbors and source
+   session.
+3. Source. `expand_episodic(id, events=true)` pages the captured events
+   behind a record. Open them only when an important detail is uncertain,
+   such as what was actually run or what was reported as the outcome.
 
 Use `get-schema` and `read-cypher` only for questions the memory tools
 cannot answer, such as which sessions ran a given command this week.

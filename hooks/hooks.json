@@ -77,7 +77,7 @@
         ]
       },
       {
-        "matcher": "mcp__plugin_unified-agent-memory_memory__(search|expand)",
+        "matcher": "mcp__plugin_unified-agent-memory_memory__(search|expand)_episodic",
         "hooks": [
           {
             "type": "command",
