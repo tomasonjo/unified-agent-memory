@@ -18,8 +18,8 @@ The first design (August, before the chapter was drafted) had the skeleton
 the chapter kept: a `Stop` hook that extracts from the graph rather than
 from the transcript, typed observations plus one rolling summary per
 session written by a single model call, `User` and `Project` anchors, a
-session-start recap and prompt-time injection, and two MCP tools over
-one-line rows. The chapter changed the rest. This design follows the
+session-start recap, and two MCP tools over one-line rows. The chapter
+changed the rest. This design follows the
 chapter:
 
 | Topic | First design | Chapter 3 (this design) |
@@ -32,6 +32,7 @@ chapter:
 | Readiness | Not addressed | A window is ready only once its closing event is committed |
 | Recall bookkeeping | `INJECTED_IN`, reset on clear or compact | `INJECTED_IN` and `INJECTED_AT` carrying version, detail level, context generation, and status; the rendered block kept on the delivery event; `search_episodic` and `expand_episodic` results recorded too |
 | Recap | Three session one-liners | Recent sessions and recent activity, the historical-record framing, and a tool hint |
+| Prompt-time recall | Episodes injected beside each prompt | None: the session-start recap and the tools are the only recall paths |
 | Tools | `memory_search`, `memory_expand` | `search_episodic` and `expand_episodic`, on a `memory` server that also hosts the read-only graph tools |
 | Recalled claims | Not addressed | A restated recalled claim is attributed to its originating memory, never counted as a new confirmation |
 | Keys | Slug of the git-root name | Git-root directory name with an explicit override; an explicit user id for people with several addresses |
@@ -157,7 +158,7 @@ In `hooks/common.py`:
   run takes about 160 ms against a local database. The hook prints
   nothing, so the original text is shown.
 - **Tool results** stay unstored. Recording what the memory tools returned
-  belongs to recall, in [5.3](#53-delivery-records-and-duplicate-suppression).
+  belongs to recall, in [5.2](#52-delivery-records-and-duplicate-suppression).
 
 ## 4. Extraction
 
@@ -378,13 +379,13 @@ transaction. The transaction then runs these steps:
 
 ## 5. Recall hooks
 
-`hooks/recall.py` owns recall through three entry points. It shares
+`hooks/recall.py` owns recall through two entry points. It shares
 retrieval and rendering with the MCP server through `hooks/episodes.py`.
-Each entry point works within a time budget (5 seconds for the recap, 3
-for prompt-time episodes including the query embedding, 5 for recording a
-tool delivery), with the hook `timeout` as a backstop, and returns nothing
-when the store is slow or unavailable. Measured: the recap hook returns in
-about 0.2 seconds once uv has its environment cached.
+Each entry point works within a time budget (5 seconds for the recap, 5
+for recording a tool delivery), with the hook `timeout` as a backstop,
+and returns nothing when the store is slow or unavailable. Measured: the
+recap hook returns in about 0.2 seconds once uv has its environment
+cached.
 
 ### 5.1 Session-start recap
 
@@ -436,38 +437,7 @@ A returning user's own session gets one more line under its row:
 
 An empty project gets no block.
 
-### 5.2 Prompt-time episodes
-
-This entry point runs on `UserPromptSubmit`. It uses the hybrid search
-from [6.3](#63-search_episodic) with the prompt as the query, within the
-project, over both kinds, excluding the current session's own records, and
-keeps at most three rows.
-
-Normalized scores order candidates without measuring relevance (each
-leg's best scores 1.0 however weak it is), so a candidate must also clear
-a floor on at least one leg. That floor is what
-lets an unrelated prompt receive nothing. The embedding call counts
-against the hook's time budget. The block starts
-`Related memory from <project>:` and ends with the same framing lines as
-the recap.
-
-**Decision:** the fulltext floor counts shared words rather than Lucene's
-score. The query is the prompt's distinctive words (no stopwords, no words
-under three letters, at most 24), each with a naive singular, because the
-default analyzer does not stem and "renewals" would miss "renewal". A
-candidate must contain at least two of those words, or a quarter of them
-for a long prompt, with a word and its singular counting once. A raw score
-turned out to be the wrong floor: it moves with the store (the same record
-scored 2.6 for the same query among three records, and 4.3 after four
-unrelated records were added), so a floor tuned on one store misjudges
-another. On a test store, the shared-word
-floor found the right record for five related prompts and returned nothing
-for six of seven unrelated ones; the seventh, about running the test
-suite, drew a note about a flaky test. The vector floor stays a raw score,
-0.80 on Neo4j's `(1 + cosine) / 2` scale. Both floors are tuned with the
-chapter 9 evaluations.
-
-### 5.3 Delivery records and duplicate suppression
+### 5.2 Delivery records and duplicate suppression
 
 A delivery is identified by memory id, version, detail level, and context
 generation. The detail level is `title` for a row and `full` for an opened
@@ -481,9 +451,9 @@ deliveries carry version 1; only summaries advance.
   compaction useful memory can come back.
 - **Recording** follows chapter 2's injection pattern of appending the
   event and setting properties on it:
-  1. Append the carrying event (`SessionStart` or `UserPromptSubmit`).
-     Set `recall_block` to the exact rendered text, `recall_channel` to
-     `recap` or `prompt`, and `recall_status` to `prepared`.
+  1. Append the carrying `SessionStart` event. Set `recall_block` to the
+     exact rendered text, `recall_channel` to `recap`, and
+     `recall_status` to `prepared`.
   2. Create
      `(memory)-[:INJECTED_AT {version, detail, context_generation, channel, status}]->(event)`
      for each delivered memory. These relationships are the audit of the
@@ -596,8 +566,6 @@ The signature follows the chapter:
   its scores by its best one, so both run 0–1, and a record both legs
   found keeps its higher score. If that query fails, the first leg that
   runs alone answers, so a missing index costs only its own leg.
-  Prompt-time recall merges its legs the same way in Python, because it
-  filters fulltext candidates by shared words first.
 - **Parameters.** `project` defaults to the current project. `since`
   and `until` accept an ISO date or a relative span such as `7d`, and
   filter on `source_end` as a half-open window: `since` inclusive,
@@ -676,9 +644,9 @@ off as the completion.
 |---|---|---|
 | `hooks/common.py` | Project and user resolution with overrides; write-once owner and project anchors in `_append_event`; context generation; new constraints, one-query schema check, and env keys | Done |
 | `hooks/log_event.py` | Keeps `prompt_id`, and a failed call's reason as `tool_error` | Done |
-| `hooks/episodes.py` | New: schema and indexes, retrieval (recent records, hybrid search with normalized score fusion, expand queries), row rendering, display-id resolution, recap and prompt-time selection, delivery recording | Done |
+| `hooks/episodes.py` | New: schema and indexes, retrieval (recent records, hybrid search with normalized score fusion, expand queries), row rendering, display-id resolution, recap selection, delivery recording | Done |
 | `hooks/extract_memory.py` | New: the `Stop` and `SessionEnd` trigger, the `SessionStart` sweep, and the worker | Done |
-| `hooks/recall.py` | New: the `SessionStart` recap, `UserPromptSubmit` episodes, and `PostToolUse` records for the memory tools | Done |
+| `hooks/recall.py` | New: the `SessionStart` recap and `PostToolUse` records for the memory tools | Done |
 | `hooks/llm.py` | Adds `embed_texts()`, `completion_model()`, `max_tokens`, and the headless-call flags | Done |
 | `hooks/hooks.json` | Wires the new entry points | Done |
 | `mcp/server.py` | New: the `memory` server, with `search_episodic`, `expand_episodic`, and the proxied read-only graph tools | Done |
@@ -763,7 +731,7 @@ delivered blocks are on their events.
 5. **Tool results.** Chapter 2 stores no tool results, while chapter 3
    asks to record what `search_episodic` and `expand_episodic` returned.
    This design stores only the memory tools' responses, on the recall side
-   ([5.3](#53-delivery-records-and-duplicate-suppression)). One sentence
+   ([5.2](#52-delivery-records-and-duplicate-suppression)). One sentence
    in the chapter would make that explicit.
 6. **The recording direction. Resolved in the chapter.** Chapter 3 used
    to call `INJECTED_IN` and `INJECTED_AT` "the same recording pattern
@@ -831,11 +799,9 @@ delivered blocks are on their events.
     shared 1.5 seconds. The design's foreground append of the closing event
     moved into the worker ([4.1](#41-trigger)). The chapter's listing, which
     says the script "starts the worker and returns", is unaffected.
-13. **The relevance floor.** The chapter asks for "a relevance threshold
-    so that unrelated prompts receive nothing"; this design had assumed a
-    raw-score floor per leg. On fulltext, a raw score cannot be that
-    threshold, so the fulltext leg counts shared words
-    ([5.2](#52-prompt-time-episodes)).
+13. **Prompt-time recall. Removed with the chapter.** The chapter now
+    covers only the session-start recap, so the `UserPromptSubmit` entry
+    point, its relevance floor, and its Python-side fusion were removed.
 14. **Headless auth.** With the default `claude-cli` backend, every window
     runs `claude -p`, which authenticates with the CLI's own login, not the
     one a desktop app holds. When that login has expired, every call fails

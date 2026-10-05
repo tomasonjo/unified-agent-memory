@@ -1,5 +1,5 @@
 {
-  "description": "Unified Agent Memory hooks, one concern per script. log_event.py captures every lifecycle event as a :SessionEvent chain in Neo4j. inject_system_prompt.py injects the standing instructions at session start. extract_memory.py consolidates captured events into episodes: on Stop and SessionEnd it starts a detached worker and returns, and on SessionStart (startup) it sweeps up windows an interrupted worker left behind. recall.py pushes episodes into the session (a recap at session start, related episodes beside a prompt) and records what the memory tools returned. All are PEP 723 uv scripts. Resolves its own root: ${CLAUDE_PLUGIN_ROOT} when installed as a plugin, else ${CLAUDE_PROJECT_DIR} when running from a repo checkout.",
+  "description": "Unified Agent Memory hooks, one concern per script. log_event.py captures every lifecycle event as a :SessionEvent chain in Neo4j. inject_system_prompt.py injects the standing instructions at session start. extract_memory.py consolidates captured events into episodes: on Stop and SessionEnd it starts a detached worker and returns, and on SessionStart (startup) it sweeps up windows an interrupted worker left behind. recall.py injects a recap of recent project activity at session start and records what the memory tools returned. All are PEP 723 uv scripts. Resolves its own root: ${CLAUDE_PLUGIN_ROOT} when installed as a plugin, else ${CLAUDE_PROJECT_DIR} when running from a repo checkout.",
   "hooks": {
     "SessionStart": [
       {
@@ -44,15 +44,6 @@
           {
             "type": "command",
             "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\""
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/recall.py\"",
-            "timeout": 15
           }
         ]
       }

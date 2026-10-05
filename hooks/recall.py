@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["neo4j>=5.26.0", "litellm>=1.0"]
+# dependencies = ["neo4j>=5.26.0"]
 # ///
 """Recall: push episodes into a session, and record what it received.
 
-One script, three entry points, chosen by the hook event:
+One script, two entry points, chosen by the hook event:
 
 - ``SessionStart`` (every source): a recap of recent project activity, so
   the agent starts aware of the team's work. Selection is code, by recency;
   no model call. The block names the project, labels itself as history, and
   says how to open more, because it lands beside the standing instructions
   from another hook and must stand alone.
-- ``UserPromptSubmit``: up to three episodes from other sessions that the
-  prompt is likely about. A candidate must clear a relevance floor, so an
-  unrelated prompt receives nothing.
 - ``PostToolUse`` on the memory server's ``search_episodic`` and
   ``expand_episodic``: records what those tools returned, so the delivery record covers what the agent
   opened itself, not only what hooks pushed.
@@ -53,9 +50,8 @@ from common import (  # noqa: E402
 from log_event import build_event_props  # noqa: E402
 
 # Seconds each entry point may take before it gives up and delivers
-# nothing. The prompt budget includes the query embedding, when one is
-# configured. The hook timeouts in hooks.json are only a backstop.
-BUDGETS = {"SessionStart": 5.0, "UserPromptSubmit": 3.0, "PostToolUse": 5.0}
+# nothing. The hook timeouts in hooks.json are only a backstop.
+BUDGETS = {"SessionStart": 5.0, "PostToolUse": 5.0}
 FINALIZE_SECONDS = 2.0
 # mcp__plugin_unified-agent-memory_memory__search_episodic as a plugin
 # server; mcp__memory__search_episodic when the same server is configured
@@ -108,49 +104,6 @@ def recap(db, payload: dict) -> Delivery | None:
         state["generation"],
     )
     return Delivery(session_id, event_id, block, "SessionStart", memories,
-                    state["generation"])
-
-
-def _query_vector(prompt: str):
-    from llm import embed_texts, embeddings_ready
-
-    if not embeddings_ready():
-        return None
-    try:
-        return embed_texts([prompt])[0]
-    except Exception as exc:
-        print(f"[recall] prompt embedding failed, fulltext only: {exc}", file=sys.stderr)
-        return None
-
-
-def prompt_episodes(db, payload: dict) -> Delivery | None:
-    """Episodes from other sessions that the prompt is likely about."""
-    from llm import embeddings_ready
-
-    session_id = str(payload.get("session_id") or "")
-    prompt = str(payload.get("prompt") or "")
-    if not episodes.prompt_terms(prompt) and not embeddings_ready():
-        return None
-    run = episodes.reader(db)
-    state = episodes.session_state(run, session_id)
-    if not state or not state["project"]:
-        return None
-    rows = episodes.related(
-        run, prompt, _query_vector(prompt), state["project"], session_id
-    )
-    rows = episodes.unseen(rows, episodes.delivered(run, session_id, state["generation"]))
-    block = episodes.render_related(state["project"], rows)
-    if not block:
-        return None
-    event_id = append_event(
-        db, session_id, "UserPromptSubmit", build_event_props(payload)
-    )
-    memories = _memories(rows)
-    db.execute_write(
-        episodes.prepare_delivery, event_id, block, "prompt", memories,
-        state["generation"],
-    )
-    return Delivery(session_id, event_id, block, "UserPromptSubmit", memories,
                     state["generation"])
 
 
@@ -233,7 +186,6 @@ def tool_delivery(db, payload: dict) -> None:
 
 HANDLERS = {
     "SessionStart": recap,
-    "UserPromptSubmit": prompt_episodes,
     "PostToolUse": tool_delivery,
 }
 

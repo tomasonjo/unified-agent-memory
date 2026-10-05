@@ -18,9 +18,9 @@ callable, so the caller owns sessions and access mode, and tests can run
 the helpers inside a transaction they roll back. The module imports with
 the standard library alone.
 
-The recall hooks use the same rows. A delivery (a recap, prompt-time
-episodes, or what ``search_episodic`` and ``expand_episodic`` returned)
-is recorded on the event that carried it: the exact block, plus
+The recall hooks use the same rows. A delivery (a recap, or what
+``search_episodic`` and ``expand_episodic`` returned) is recorded on the
+event that carried it: the exact block, plus
 ``(memory)-[:INJECTED_AT]->(event)`` per delivered memory and
 ``(memory)-[:INJECTED_IN]->(session)``, whose properties say what the
 session's current context has already seen, so the same thing is not
@@ -480,26 +480,6 @@ def older_call(until: str, **filters) -> str:
     return f"Older: search_episodic({', '.join(args)})"
 
 
-def fuse(legs: list[list[dict]]) -> list[dict]:
-    """Legs merged as the fused search merges them, best first.
-
-    Each leg's scores are divided by its best one, so a fulltext score and
-    a cosine similarity share a 0-1 scale, and a row found by several legs
-    keeps its highest. Ties keep the order in which rows were first seen.
-    """
-    scores: dict[str, float] = {}
-    rows: dict[str, dict] = {}
-    for leg in legs:
-        best = max((row["score"] for row in leg), default=0.0)
-        if best <= 0:
-            continue
-        for row in leg:
-            key = row["key"]
-            scores[key] = max(scores.get(key, 0.0), row["score"] / best)
-            rows.setdefault(key, row)
-    return sorted(rows.values(), key=lambda row: -scores[row["key"]])
-
-
 def _fused(run, branches: list[str], **params) -> list[dict]:
     """The fused search, or the first leg that runs alone if it fails.
 
@@ -513,14 +493,6 @@ def _fused(run, branches: list[str], **params) -> list[dict]:
         except Exception as exc:
             print(f"[uam] search legs skipped: {exc}", file=sys.stderr)
     return []
-
-
-def _leg(run, cypher: str, **params) -> list[dict]:
-    try:
-        return run(cypher, **params)
-    except Exception as exc:  # a missing index costs its own leg, not the search
-        print(f"[uam] search leg {params.get('index')} skipped: {exc}", file=sys.stderr)
-        return []
 
 
 def hybrid_search(
@@ -857,26 +829,9 @@ def expand(
 
 RECAP_SESSIONS = 3
 RECAP_OBSERVATIONS = 5
-RELATED_ROWS = 3
 OWN_PROGRESS_CHARS = 300
 RECALL_BLOCK_CHARS = 3000
 DELIVERY_BLOCK_CHARS = 8000
-
-# Normalized scores order candidates but cannot say whether any of them
-# is relevant: each leg's best scores 1.0 however weak it is. So
-# prompt-time recall also asks each candidate to clear a floor on at
-# least one leg. That floor is what lets an unrelated prompt
-# receive nothing. A raw Lucene score makes a poor floor: it moves with the
-# size and wording of the store (the same record scored 2.6 for the same
-# query among three records, and 4.3 after four unrelated ones were
-# added). So a fulltext candidate must
-# instead share at least two of the prompt's distinctive words, or a
-# quarter of them for a long prompt. The vector floor is Neo4j's cosine
-# score, (1 + cosine) / 2, and depends on the embedding model. Chapter 9's
-# evaluations are where both get tuned.
-MIN_SHARED_TERMS = 2
-VECTOR_FLOOR = 0.80
-MAX_PROMPT_TERMS = 24
 
 FRAMING = (
     "This is a historical record of past work. It does not assign\n"
@@ -916,28 +871,6 @@ RETURN 'observation' AS kind, node.display_id AS display_id, node.id AS ref,
        node.type AS type, node.title AS text, null AS user,
        node.source_end AS source_end, node.id AS key, 1 AS version
 """
-
-_RELATED_TAIL = f"""
-WITH node, score ORDER BY score DESC LIMIT $candidates
-OPTIONAL MATCH (s:Session)-[:HAS_SUMMARY]->(node)
-RETURN {ROW_FIELDS}, coalesce(node.version, 1) AS version, score,
-       [text IN [node.title, node.narrative, node.headline, node.request,
-                 node.progress, node.outcome]
-        WHERE text IS NOT NULL] AS searchable
-ORDER BY score DESC
-"""
-_RELATED_FILTERS = """node.project_id = $project AND node.session_id <> $session_id
-  AND score >= $floor"""
-RELATED_FULLTEXT = (
-    "CALL db.index.fulltext.queryNodes($index, $text)\nYIELD node, score\n"
-    f"WHERE {_RELATED_FILTERS}" + _RELATED_TAIL
-)
-RELATED_VECTOR = (
-    "CYPHER 25\n"
-    + vector_search(in_project=True)
-    + "WHERE node.session_id <> $session_id AND score >= $floor"
-    + _RELATED_TAIL
-)
 
 DELIVERED = """
 MATCH (m)-[r:INJECTED_IN]->(:Session {session_id: $session_id})
@@ -1019,82 +952,6 @@ MATCH (s:Session {session_id: $session_id})
 RETURN s.project_id AS project, s.user_id AS user,
        coalesce(s.context_generation, 1) AS generation
 """
-
-_STOPWORDS = frozenset(
-    """
-    a about above after again against all also am an and any are as at be
-    because been before being below between both but by can could did do
-    does doing done down during each else few for from further get got had
-    has have having he her here hers him his how i if in into is it its
-    itself just let like me more most my no nor not now of off on once only
-    or other our ours out over own please same she should so some such than
-    that the their them then there these they this those through to too
-    under until up us very want was we were what when where which while who
-    whom why will with would yes you your yours okay ok thanks thank sure
-    make need use using used tell show give look find see try let's i'm
-    it's that's there's what's don't can't won't
-    """.split()
-)
-_WORD = re.compile(r"[a-z0-9][a-z0-9_\-./]*[a-z0-9]|[a-z0-9]", re.IGNORECASE)
-
-
-def prompt_terms(text: str | None, limit: int = MAX_PROMPT_TERMS) -> list[str]:
-    """The prompt's distinctive words, in order: no stopwords, no short words.
-
-    A whole prompt as a fulltext query would match any record sharing one
-    common word with it; these are the words worth matching on. Long pasted
-    text contributes its first ``limit`` distinct terms.
-    """
-    terms: list[str] = []
-    for match in _WORD.finditer((text or "")[:4000].lower()):
-        word = match.group(0).strip("-./_")
-        if len(word) < 3 or word in _STOPWORDS or word.isdigit() or word in terms:
-            continue
-        terms.append(word)
-        if len(terms) == limit:
-            break
-    return terms
-
-
-def _singular(term: str) -> str:
-    if len(term) > 4 and term.endswith("ies"):
-        return term[:-3] + "y"
-    if len(term) > 3 and term.endswith("s") and not term.endswith(("ss", "us", "is")):
-        return term[:-1]
-    return term
-
-
-def with_singulars(terms: list[str]) -> list[str]:
-    """``terms`` plus a plain singular of each plural-looking one.
-
-    The fulltext index uses Lucene's standard analyzer, which does not
-    stem, so a prompt about "renewals" would miss a record about a
-    "renewal". A naive singular is enough for the common case, and a
-    variant that matches nothing costs nothing.
-    """
-    out: list[str] = []
-    for term in terms:
-        out.append(term)
-        if _singular(term) != term:
-            out.append(_singular(term))
-    return out
-
-
-def shared_terms(terms: list[str], texts: list[str]) -> int:
-    """How many of the prompt's terms a record's text contains, a word and
-    its singular counting once."""
-    words = {
-        _singular(match.group(0).strip("-./_"))
-        for text in texts
-        for match in _WORD.finditer(str(text).lower())
-    }
-    return len({_singular(term) for term in terms} & words)
-
-
-def enough_shared(terms: list[str]) -> int:
-    """Shared terms a fulltext candidate needs: two, or a quarter of a long prompt's."""
-    return max(MIN_SHARED_TERMS, -(-len(terms) // 4))
-
 
 def session_state(run, session_id: str) -> dict | None:
     """The receiving session's project, owner, and context generation."""
@@ -1178,58 +1035,6 @@ def render_recap(
             lines.append("")
         lines.append("Recent activity:")
         lines += ["- " + render_row(row, now) for row in observations]
-    lines += ["", FRAMING]
-    return bound("\n".join(lines), RECALL_BLOCK_CHARS)
-
-
-def related(
-    run,
-    prompt: str | None,
-    vector,
-    project: str,
-    session_id: str,
-    limit: int = RELATED_ROWS,
-    vector_floor: float = VECTOR_FLOOR,
-) -> list[dict]:
-    """Episodes from other sessions that a prompt is likely about.
-
-    The same legs as ``hybrid_search``, restricted to the project and to
-    other sessions' records, with each leg's candidates cut at its floor
-    before fusion: shared words for the fulltext leg, similarity for
-    the vector leg. No candidate above a floor means no rows.
-    """
-    terms = prompt_terms(prompt)
-    params = {
-        "project": project,
-        "session_id": session_id,
-        "candidates": limit * CANDIDATES_PER_ROW,
-    }
-    legs = []
-    if terms:
-        needed = enough_shared(terms)
-        rows = _leg(
-            run,
-            RELATED_FULLTEXT,
-            index=FULLTEXT_INDEX,
-            text=lucene_query(" ".join(with_singulars(terms))),
-            floor=0.0,
-            **params,
-        )
-        legs.append([row for row in rows if shared_terms(terms, row["searchable"]) >= needed])
-    if vector is not None:
-        legs.append(
-            _leg(run, RELATED_VECTOR, index=VECTOR_INDEX, vector=vector,
-                 floor=vector_floor, **params)
-        )
-    return fuse([leg for leg in legs if leg])[:limit]
-
-
-def render_related(project: str, rows: list[dict], now: datetime | None = None) -> str:
-    """The prompt-time block: a few related rows and the same framing."""
-    if not rows:
-        return ""
-    lines = [f"Related memory from {project}:"]
-    lines += ["- " + render_row(row, now) for row in rows]
     lines += ["", FRAMING]
     return bound("\n".join(lines), RECALL_BLOCK_CHARS)
 

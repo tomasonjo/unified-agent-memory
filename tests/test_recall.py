@@ -36,11 +36,6 @@ def start(session_id: str, source: str = "startup") -> dict:
             "source": source, "cwd": str(ROOT)}
 
 
-def prompt(session_id: str, text: str) -> dict:
-    return {"session_id": session_id, "hook_event_name": "UserPromptSubmit",
-            "prompt": text, "prompt_id": f"p-{abs(hash(text))}", "cwd": str(ROOT)}
-
-
 @pytest.fixture
 def maria_worked(graph, model, monkeypatch):
     """Maria's investigation, captured and consolidated; then the analyst's turn."""
@@ -125,33 +120,6 @@ def test_the_same_context_is_not_sent_twice_but_compaction_restores_it(maria_wor
     again = recall.recap(graph.session, start("s-analyst", "compact"))
     assert again is not None and again.generation == 2
     assert f"#s1 · session · just now · {MARIA}" in again.block
-
-
-def test_prompt_time_recall_is_relevant_or_silent(maria_worked):
-    graph = maria_worked
-    capture("s-analyst", "SessionStart", source="startup")
-    related = recall.prompt_episodes(
-        graph.session, prompt("s-analyst", "Why did renewals drop for reactivated contracts?")
-    )
-    assert related is not None
-    assert related.block.startswith("Related memory from renewal-analysis:\n- #")
-    assert "#o1" in related.block and related.block.endswith(episodes.FRAMING)
-    assert graph.value(
-        "MATCH (e:SessionEvent {event_name: 'UserPromptSubmit', session_id: 's-analyst'}) "
-        "RETURN e.recall_channel"
-    ) == "prompt"
-    assert recall.prompt_episodes(
-        graph.session, prompt("s-analyst", "Add a dark mode toggle to the settings page")
-    ) is None
-    assert recall.prompt_episodes(graph.session, prompt("s-analyst", "continue")) is None
-
-
-def test_prompt_time_recall_skips_what_the_recap_already_gave(maria_worked):
-    graph = maria_worked
-    recall.finalize(graph.session, recall.recap(graph.session, start("s-analyst")))
-    assert recall.prompt_episodes(
-        graph.session, prompt("s-analyst", "Why did renewals drop for reactivated contracts?")
-    ) is None
 
 
 def test_a_recap_title_does_not_block_opening_the_record(maria_worked):
@@ -240,9 +208,6 @@ def test_the_hook_script_returns_the_recap_and_marks_it_returned(maria_worked):
         "MATCH (e:SessionEvent {session_id: 's-analyst', event_name: 'SessionStart'}) "
         "RETURN e.recall_status"
     ) == "returned"
-    unrelated = run_hook(prompt("s-analyst", "Add a dark mode toggle to the settings page"),
-                         UAM_USER_ID=ANALYST)
-    assert unrelated.returncode == 0 and unrelated.stdout == ""
 
 
 def test_an_unreachable_store_costs_the_block_not_the_session(graph):

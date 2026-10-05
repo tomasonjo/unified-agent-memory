@@ -19,8 +19,8 @@ system, one piece per chapter of the book it accompanies:
    session's work stands, linked to the project, the session, and the
    events they came from.
 4. **Recall.** A new session starts with a recap of recent project
-   activity, a prompt can bring related episodes along, and the `memory`
-   MCP server lets the agent search and open episodes on its own.
+   activity, and the `memory` MCP server lets the agent search and open
+   episodes on its own.
 
 It also ships three skills. `/orchestrate` turns the agent into a subagent
 orchestrator: recall memory before the work starts, route the relevant
@@ -59,7 +59,7 @@ hooks/
   inject_system_prompt.py  # recall: system prompt -> session context
   default_system_prompt.md # the bundled default prompt (injection's fallback)
   extract_memory.py    # consolidation: captured events -> observations + summary
-  recall.py            # recall: recap, prompt-time episodes, delivery records
+  recall.py            # recall: session-start recap, delivery records
   llm.py               # background-agent LLM: headless claude (default) or LiteLLM
   episodes.py          # episodic reads and delivery records (memory server, recall)
 skills/
@@ -231,10 +231,8 @@ Use expand_episodic(id) to inspect an item, or
 search_episodic(query) to find more.
 ```
 
-On `UserPromptSubmit` it adds up to three episodes from other sessions
-that share enough of the prompt's words, and nothing for an unrelated
-prompt. After the memory server's `search_episodic` and `expand_episodic`
-it records what they returned. Every delivery is kept on the event that
+After the memory server's `search_episodic` and `expand_episodic` it
+records what they returned. Every delivery is kept on the event that
 carried it, block and all, with `(memory)-[:INJECTED_AT]->(event)` and
 `(memory)-[:INJECTED_IN]->(session)`, so the same memory is not sent twice
 into one context, and a compaction lets it come back. Each entry point has
@@ -436,8 +434,8 @@ the same `(:Project)` node. A value in the env file pins every repository
 on the machine, so export it per repository instead; for Claude Code, use
 the `env` block of the repository's `.claude/settings.json`. An embedding
 model is a LiteLLM model string, paid for by its provider's key. The
-`claude-cli` backend has no embeddings, and without a model, search and
-prompt-time recall run on stored text alone.
+`claude-cli` backend has no embeddings, and without a model, search runs
+on stored text alone.
 
 Consolidation is the first background job that calls the LLM, once per
 turn. With the default `claude-cli` backend that is the `claude` CLI's own

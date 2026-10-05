@@ -70,13 +70,6 @@ def test_the_project_filter_runs_inside_the_index(indexed):
     assert [row["display_id"] for row in rows] == ["o101"]
 
 
-def test_related_recall_reads_the_same_index(indexed):
-    run = episodes.reader(indexed.session)
-    rows = episodes.related(run, None, QUERY, PROJECT, "s-analyst")
-    assert {row["display_id"] for row in rows} == {"o1", "s1"}
-    assert episodes.related(run, None, QUERY, PROJECT, "s-maria") == []
-
-
 def test_both_legs_are_fused_in_one_query(indexed):
     run = episodes.reader(indexed.session)
     # Only o1's title says "pipeline"; the vector leg finds s1 as well.
