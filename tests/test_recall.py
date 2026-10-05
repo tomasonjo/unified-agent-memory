@@ -16,10 +16,8 @@ import recall
 from conftest import (
     ANALYST,
     MARIA,
-    PROJECT,
     ROOT,
     TEST_DATABASE,
-    capture,
     observation,
     summary,
     turn,
@@ -46,20 +44,21 @@ def maria_worked(graph, model, monkeypatch):
     return graph
 
 
-def delivered_as(graph, event_name: str, session_id: str) -> list[dict]:
-    return graph.rows(
-        "MATCH (m)-[r:INJECTED_AT]->(e:SessionEvent {event_name: $name, session_id: $sid}) "
-        "RETURN coalesce(m.display_id, m.id) AS memory, r.detail AS detail, "
-        "r.version AS version, r.context_generation AS generation, "
-        "r.channel AS channel, r.status AS status ORDER BY memory",
-        name=event_name, sid=session_id,
-    )
+def delivered_at(graph, event_name: str, session_id: str) -> list[str]:
+    return [
+        row["memory"]
+        for row in graph.rows(
+            "MATCH (m)-[:INJECTED_AT]->(e:SessionEvent {event_name: $name, session_id: $sid}) "
+            "RETURN coalesce(m.display_id, m.id) AS memory ORDER BY memory",
+            name=event_name, sid=session_id,
+        )
+    ]
 
 
 def test_a_fresh_analyst_starts_with_marias_handoff(maria_worked):
     graph = maria_worked
-    delivery = recall.recap(graph.session, start("s-analyst"))
-    lines = delivery.block.splitlines()
+    block = recall.recap(graph.session, start("s-analyst"))
+    lines = block.splitlines()
     assert lines[:3] == ["Previously, on renewal-analysis:", "", "Recent sessions:"]
     assert lines[3] == f"- #s1 · session · just now · {MARIA} · {HEADLINE}"
     assert lines[4:8] == [
@@ -68,31 +67,21 @@ def test_a_fresh_analyst_starts_with_marias_handoff(maria_worked):
         "- #o1 · discovery · just now · Renewal drop traced to March pipeline change",
         "- #o2 · bugfix · just now · Dashboard query corrected for reactivated contracts",
     ]
-    assert delivery.block.endswith(episodes.FRAMING)
-    assert "Where you left off" not in delivery.block  # Maria's stays in her summary
+    assert block.endswith(episodes.FRAMING)
+    assert "Where you left off" not in block  # Maria's stays in her summary
 
     event = graph.rows(
         "MATCH (e:SessionEvent {session_id: 's-analyst', event_name: 'SessionStart'}) "
-        "RETURN e.recall_block AS block, e.recall_status AS status, e.recall_channel AS channel"
+        "RETURN e.recall_block AS block, e.recall_channel AS channel"
     )[0]
-    assert event == {"block": delivery.block, "status": "prepared", "channel": "recap"}
-    assert delivered_as(graph, "SessionStart", "s-analyst") == [
-        {"memory": "o1", "detail": "title", "version": 1, "generation": 1,
-         "channel": "recap", "status": "prepared"},
-        {"memory": "o2", "detail": "title", "version": 1, "generation": 1,
-         "channel": "recap", "status": "prepared"},
-        {"memory": "sum:s-maria", "detail": "title", "version": 1, "generation": 1,
-         "channel": "recap", "status": "prepared"},
-    ]
+    assert event == {"block": block, "channel": "recap"}
+    assert delivered_at(graph, "SessionStart", "s-analyst") == ["o1", "o2", "sum:s-maria"]
 
-    recall.finalize(graph.session, delivery)
+    # Which sessions received Maria's handoff: one hop from the event.
     assert graph.value(
-        "MATCH (e:SessionEvent {session_id: 's-analyst', event_name: 'SessionStart'}) "
-        "RETURN e.recall_status"
-    ) == "returned"
-    assert graph.value(
-        "MATCH (m)-[r:INJECTED_IN]->(:Session {session_id: 's-analyst'}) RETURN count(m)"
-    ) == 3
+        "MATCH (:SessionSummary {id: 'sum:s-maria'})-[:INJECTED_AT]->(:SessionEvent)"
+        "<-[:HAS_EVENT]-(s:Session) RETURN collect(s.session_id)"
+    ) == ["s-analyst"]
 
     # Acceptance check 2: the recap's session id opens the unfinished work.
     handoff = episodes.expand(episodes.reader(graph.session), "#s1")
@@ -101,10 +90,10 @@ def test_a_fresh_analyst_starts_with_marias_handoff(maria_worked):
 
 def test_a_returning_user_sees_where_they_left_off(maria_worked, monkeypatch):
     monkeypatch.setenv("UAM_USER_ID", MARIA)
-    delivery = recall.recap(maria_worked.session, start("s-maria-2"))
+    block = recall.recap(maria_worked.session, start("s-maria-2"))
     assert (
         "  Where you left off: Corrected the current dashboard query. Historical reports that cross March 3 are not yet checked."
-        in delivery.block.splitlines()
+        in block.splitlines()
     )
 
 
@@ -112,19 +101,24 @@ def test_an_empty_project_gets_no_block(graph):
     assert recall.recap(graph.session, start("s-first")) is None
 
 
-def test_the_same_context_is_not_sent_twice_but_compaction_restores_it(maria_worked):
+def test_each_session_start_records_its_own_recap(maria_worked):
     graph = maria_worked
-    recall.finalize(graph.session, recall.recap(graph.session, start("s-analyst")))
-    assert recall.recap(graph.session, start("s-analyst", "resume")) is None
-    capture("s-analyst", "PreCompact", trigger="auto")
+    first = recall.recap(graph.session, start("s-analyst"))
     again = recall.recap(graph.session, start("s-analyst", "compact"))
-    assert again is not None and again.generation == 2
-    assert f"#s1 · session · just now · {MARIA}" in again.block
+    assert f"#s1 · session · just now · {MARIA}" in again
+    assert graph.rows(
+        "MATCH (e:SessionEvent {session_id: 's-analyst', event_name: 'SessionStart'}) "
+        "OPTIONAL MATCH (m)-[:INJECTED_AT]->(e) "
+        "RETURN e.source AS source, e.recall_block AS block, count(m) AS memories "
+        "ORDER BY source"
+    ) == [
+        {"source": "compact", "block": again, "memories": 3},
+        {"source": "startup", "block": first, "memories": 3},
+    ]
 
 
-def test_a_recap_title_does_not_block_opening_the_record(maria_worked):
+def test_an_expanded_record_is_recorded_on_its_tool_event(maria_worked):
     graph = maria_worked
-    recall.finalize(graph.session, recall.recap(graph.session, start("s-analyst")))
     opened = episodes.expand(episodes.reader(graph.session), "#o1")
     recall.tool_delivery(graph.session, {
         "session_id": "s-analyst", "hook_event_name": "PostToolUse", "cwd": str(ROOT),
@@ -132,41 +126,16 @@ def test_a_recap_title_does_not_block_opening_the_record(maria_worked):
         "tool_input": {"id": "#o1"}, "tool_use_id": "toolu_expand",
         "tool_response": [{"type": "text", "text": opened}],
     })
-    assert {
-        (row["memory"], row["detail"])
-        for row in delivered_as(graph, "PostToolUse", "s-analyst")
-    } == {("o1", "full"), ("o2", "title"), ("sum:s-maria", "title")}
-    assert graph.value(
-        "MATCH (:Observation {display_id: 'o1'})-[r:INJECTED_IN]->"
-        "(:Session {session_id: 's-analyst'}) RETURN r.detail"
-    ) == "full"
-    assert graph.value(
+    assert delivered_at(graph, "PostToolUse", "s-analyst") == ["o1", "o2", "sum:s-maria"]
+    assert graph.rows(
         "MATCH (e:SessionEvent {event_name: 'PostToolUse', session_id: 's-analyst'}) "
-        "RETURN e.recall_block"
-    ) == opened
-
-
-def test_a_subagents_search_does_not_count_for_the_main_context(maria_worked):
-    graph = maria_worked
-    capture("s-analyst", "SessionStart", source="startup")
-    page, _ = episodes.recent(episodes.reader(graph.session), PROJECT)
-    rows = episodes.render_rows(page)
-    recall.tool_delivery(graph.session, {
-        "session_id": "s-analyst", "hook_event_name": "PostToolUse", "cwd": str(ROOT),
-        "tool_name": "mcp__plugin_unified-agent-memory_memory__search_episodic",
-        "tool_input": {}, "tool_use_id": "toolu_search", "agent_id": "a1",
-        "agent_type": "Explore", "tool_response": rows,
-    })
-    assert graph.value(
-        "MATCH ()-[r:INJECTED_IN]->(:Session {session_id: 's-analyst'}) "
-        "RETURN count(r) AS n"
-    ) == 3
-    assert recall.recap(graph.session, start("s-analyst", "resume")) is not None
+        "RETURN e.recall_block AS block, e.recall_channel AS channel"
+    ) == [{"block": opened, "channel": "expand"}]
 
 
 def test_the_delivery_keeps_the_handoff_the_session_received(maria_worked, model, monkeypatch):
     graph = maria_worked
-    recall.finalize(graph.session, recall.recap(graph.session, start("s-analyst")))
+    recall.recap(graph.session, start("s-analyst"))
 
     monkeypatch.setenv("UAM_USER_ID", MARIA)
     turn("s-maria", "Check the historical reports.", [],
@@ -179,15 +148,16 @@ def test_the_delivery_keeps_the_handoff_the_session_received(maria_worked, model
     assert graph.value(
         "MATCH (:Session {session_id: 's-maria'})-[:HAS_SUMMARY]->(s) RETURN s.version"
     ) == 2
+    # The link leads to the current summary; the event keeps what was shown.
+    assert graph.value(
+        "MATCH (s:SessionSummary)-[:INJECTED_AT]->(:SessionEvent {session_id: 's-analyst'}) "
+        "RETURN s.headline"
+    ) == "Renewal drop resolved; history checked"
     block = graph.value(
         "MATCH (e:SessionEvent {session_id: 's-analyst', event_name: 'SessionStart'}) "
         "RETURN e.recall_block"
     )
     assert HEADLINE in block and "history checked" not in block
-    assert graph.value(
-        "MATCH (:SessionSummary)-[r:INJECTED_AT]->(:SessionEvent {session_id: 's-analyst'}) "
-        "RETURN r.version"
-    ) == 1
 
 
 def run_hook(payload: dict, **env) -> subprocess.CompletedProcess:
@@ -198,7 +168,7 @@ def run_hook(payload: dict, **env) -> subprocess.CompletedProcess:
     )
 
 
-def test_the_hook_script_returns_the_recap_and_marks_it_returned(maria_worked):
+def test_the_hook_script_returns_the_recap_it_recorded(maria_worked):
     done = run_hook(start("s-analyst"), UAM_USER_ID=ANALYST)
     assert done.returncode == 0, done.stderr
     output = json.loads(done.stdout)["hookSpecificOutput"]
@@ -206,8 +176,8 @@ def test_the_hook_script_returns_the_recap_and_marks_it_returned(maria_worked):
     assert output["additionalContext"].startswith("Previously, on renewal-analysis:")
     assert maria_worked.value(
         "MATCH (e:SessionEvent {session_id: 's-analyst', event_name: 'SessionStart'}) "
-        "RETURN e.recall_status"
-    ) == "returned"
+        "RETURN e.recall_block"
+    ) == output["additionalContext"]
 
 
 def test_an_unreachable_store_costs_the_block_not_the_session(graph):

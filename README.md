@@ -233,9 +233,10 @@ search_episodic(query) to find more.
 
 After the memory server's `search_episodic` and `expand_episodic` it
 records what they returned. Every delivery is kept on the event that
-carried it, block and all, with `(memory)-[:INJECTED_AT]->(event)` and
-`(memory)-[:INJECTED_IN]->(session)`, so the same memory is not sent twice
-into one context, and a compaction lets it come back. Each entry point has
+carried it, block and all, with `(memory)-[:INJECTED_AT]->(event)` for
+each memory it names; the session is one `HAS_EVENT` hop away. Every
+`SessionStart`, including a resume, clear, or compact, gets its own recap
+and its own record. Each entry point has
 a time budget of a few seconds; a slow or unreachable store costs the
 block, never the session.
 
@@ -503,7 +504,7 @@ Resolution rules:
 `tests/` checks consolidation and recall against a scratch Neo4j
 database, which the tests wipe, with a scripted model in place of the real
 one: the chapter's handoff between two users, leases, stale workers,
-window splits, the input budget, and duplicate suppression. Name the
+window splits, the input budget, and the recall delivery records. Name the
 database in `UAM_TEST_DATABASE` (the name must contain "test"); the
 connection comes from the env file as for the hooks:
 

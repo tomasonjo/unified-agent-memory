@@ -20,11 +20,9 @@ the standard library alone.
 
 The recall hooks use the same rows. A delivery (a recap, or what
 ``search_episodic`` and ``expand_episodic`` returned) is recorded on the
-event that carried it: the exact block, plus
-``(memory)-[:INJECTED_AT]->(event)`` per delivered memory and
-``(memory)-[:INJECTED_IN]->(session)``, whose properties say what the
-session's current context has already seen, so the same thing is not
-sent twice.
+event that carried it: the exact block on the event, plus
+``(memory)-[:INJECTED_AT]->(event)`` per delivered memory. The session is
+one ``HAS_EVENT`` hop away.
 """
 
 from __future__ import annotations
@@ -840,14 +838,9 @@ FRAMING = (
     "search_episodic(query) to find more."
 )
 
-# Detail levels a delivery can carry. A title row is covered by a full
-# account; a full account is never covered by a title.
-DETAIL_RANK = {"title": 1, "full": 2}
-
-# Recap rows carry what a delivery record needs as well: ``key`` (the stored
-# id of the delivered memory) and its ``version``. Only records extraction
-# wrote are selected (they have a display id), and never the receiving
-# session's own.
+# Recap rows carry what a delivery record needs as well: ``key``, the
+# stored id of the delivered memory. Only records extraction wrote are
+# selected (they have a display id), and never the receiving session's own.
 RECAP_SUMMARIES = """
 MATCH (sum:SessionSummary)
 WHERE sum.project_id = $project AND sum.session_id <> $session_id
@@ -856,8 +849,7 @@ WHERE s.display_id IS NOT NULL AND ($user IS NULL OR s.user_id = $user)
 WITH s, sum ORDER BY sum.source_end DESC LIMIT $limit
 RETURN 'session' AS kind, s.display_id AS display_id, s.session_id AS ref,
        'session' AS type, sum.headline AS text, s.user_id AS user,
-       sum.source_end AS source_end, sum.id AS key, sum.version AS version,
-       sum.progress AS progress
+       sum.source_end AS source_end, sum.id AS key, sum.progress AS progress
 """
 
 # Observations from one window share their source_end; the id, which ends
@@ -869,124 +861,41 @@ WHERE node.project_id = $project AND node.session_id <> $session_id
 WITH node ORDER BY node.source_end DESC, node.id LIMIT $limit
 RETURN 'observation' AS kind, node.display_id AS display_id, node.id AS ref,
        node.type AS type, node.title AS text, null AS user,
-       node.source_end AS source_end, node.id AS key, 1 AS version
-"""
-
-DELIVERED = """
-MATCH (m)-[r:INJECTED_IN]->(:Session {session_id: $session_id})
-WHERE r.context_generation = $generation
-RETURN m.id AS key, r.version AS version, r.detail AS detail
+       node.source_end AS source_end, node.id AS key
 """
 
 RESOLVE_DISPLAY_IDS = """
 UNWIND $ids AS ref
 OPTIONAL MATCH (o:Observation {display_id: ref})
 OPTIONAL MATCH (:Session {display_id: ref})-[:HAS_SUMMARY]->(sum:SessionSummary)
-WITH ref, o, sum
-WHERE o IS NOT NULL OR sum IS NOT NULL
-RETURN ref, coalesce(o.id, sum.id) AS key,
-       CASE WHEN o IS NULL THEN sum.version ELSE 1 END AS version
+WITH ref, coalesce(o.id, sum.id) AS key
+WHERE key IS NOT NULL
+RETURN ref, key
 """
 
-# One statement per step of the delivery record. The event carries the
-# exact block; INJECTED_AT is the per-memory audit of that delivery.
-PREPARE_DELIVERY = """
+# The event carries the exact block; INJECTED_AT links each memory the
+# block names to that event.
+RECORD_DELIVERY = """
 MATCH (e:SessionEvent {event_id: $event_id})
-SET e.recall_block = $block, e.recall_channel = $channel,
-    e.recall_status = $status
+SET e.recall_block = $block, e.recall_channel = $channel
 WITH e
-UNWIND $memories AS mem
-OPTIONAL MATCH (o:Observation {id: mem.key})
-OPTIONAL MATCH (sum:SessionSummary {id: mem.key})
-WITH e, mem, coalesce(o, sum) AS m
+UNWIND $keys AS key
+OPTIONAL MATCH (o:Observation {id: key})
+OPTIONAL MATCH (sum:SessionSummary {id: key})
+WITH e, coalesce(o, sum) AS m
 WHERE m IS NOT NULL
-CREATE (m)-[:INJECTED_AT {version: mem.version, detail: mem.detail,
-                          context_generation: $generation,
-                          channel: $channel, status: $status,
-                          agent_id: $agent_id}]->(e)
-"""
-
-RETURNED = """
-MATCH (e:SessionEvent {event_id: $event_id})
-SET e.recall_status = 'returned'
-WITH e
-MATCH (m)-[r:INJECTED_AT]->(e)
-SET r.status = 'returned'
-"""
-
-# INJECTED_IN answers "which sessions received this account?" and holds
-# what the session's main context has seen in its current generation: the
-# newest version delivered, at the most detail delivered for it. Only a
-# delivery that was returned counts, and a subagent's context is its own,
-# so its deliveries are linked but never suppress the main context's.
-RECEIVED = """
-MATCH (s:Session {session_id: $session_id})
-UNWIND $memories AS mem
-OPTIONAL MATCH (o:Observation {id: mem.key})
-OPTIONAL MATCH (sum:SessionSummary {id: mem.key})
-WITH s, mem, coalesce(o, sum) AS m
-WHERE m IS NOT NULL
-MERGE (m)-[r:INJECTED_IN]->(s)
-ON CREATE SET r.first_delivered_at = datetime()
-SET r.last_delivered_at = datetime()
-FOREACH (_ IN CASE WHEN $main_context THEN [1] ELSE [] END |
-  SET r.detail = CASE
-        WHEN r.context_generation IS NULL OR r.context_generation <> $generation
-          THEN mem.detail
-        WHEN mem.version > r.version THEN mem.detail
-        WHEN mem.version = r.version AND (mem.detail = 'full' OR r.detail = 'full')
-          THEN 'full'
-        WHEN mem.version = r.version THEN mem.detail
-        ELSE r.detail END,
-      r.version = CASE
-        WHEN r.context_generation IS NULL OR r.context_generation <> $generation
-          THEN mem.version
-        WHEN mem.version > r.version THEN mem.version
-        ELSE r.version END,
-      r.context_generation = $generation
-)
+MERGE (m)-[:INJECTED_AT]->(e)
 """
 
 SESSION_STATE = """
 MATCH (s:Session {session_id: $session_id})
-RETURN s.project_id AS project, s.user_id AS user,
-       coalesce(s.context_generation, 1) AS generation
+RETURN s.project_id AS project, s.user_id AS user
 """
 
 def session_state(run, session_id: str) -> dict | None:
-    """The receiving session's project, owner, and context generation."""
+    """The receiving session's project and owner."""
     rows = run(SESSION_STATE, session_id=session_id)
     return rows[0] if rows else None
-
-
-def delivered(run, session_id: str, generation: int) -> dict[str, dict]:
-    """What the session's current context already holds, by stored memory id."""
-    return {
-        row["key"]: row
-        for row in run(DELIVERED, session_id=session_id, generation=generation)
-    }
-
-
-def unseen(rows: list[dict], seen: dict[str, dict], detail: str = "title") -> list[dict]:
-    """Rows whose delivery would add a new version or more detail.
-
-    A memory is skipped only when the current context already holds the
-    same or a later version at the same or greater detail: a title never
-    blocks the full account, a new summary version is sent again, and after
-    a compaction (a new generation) useful memory comes back.
-    """
-    wanted = DETAIL_RANK[detail]
-    fresh = []
-    for row in rows:
-        had = seen.get(row["key"])
-        if (
-            had
-            and (had.get("version") or 1) >= (row.get("version") or 1)
-            and DETAIL_RANK.get(had.get("detail"), 0) >= wanted
-        ):
-            continue
-        fresh.append(row)
-    return fresh
 
 
 def recap_rows(run, project: str, session_id: str, user: str | None) -> dict:
@@ -1051,64 +960,24 @@ def display_ids(text: str) -> list[str]:
     return seen
 
 
-def resolve_display_ids(run, ids: list[str]) -> dict[str, dict]:
-    """Stored id and current version for each display id that resolves."""
+def resolve_display_ids(run, ids: list[str]) -> dict[str, str]:
+    """Stored id for each display id that resolves."""
     if not ids:
         return {}
-    return {row["ref"]: row for row in run(RESOLVE_DISPLAY_IDS, ids=list(ids))}
+    return {row["ref"]: row["key"] for row in run(RESOLVE_DISPLAY_IDS, ids=list(ids))}
 
 
-def prepare_delivery(
-    tx,
-    event_id: str,
-    block: str,
-    channel: str,
-    memories: list[dict],
-    generation: int,
-    status: str = "prepared",
-    agent_id: str | None = None,
-) -> None:
-    """Record a delivery on the event that carries it, before it is returned.
+def record_delivery(tx, event_id: str, block: str, channel: str, keys: list[str]) -> None:
+    """Record a delivery on the event that carries it.
 
-    ``memories`` holds one ``{key, version, detail}`` per delivered memory.
     The block is stored exactly as rendered, since the memory it came from
-    may read differently tomorrow.
+    may read differently tomorrow. ``keys`` are the stored ids of the
+    memories it names.
     """
     tx.run(
-        PREPARE_DELIVERY,
+        RECORD_DELIVERY,
         event_id=event_id,
         block=bound(block, DELIVERY_BLOCK_CHARS),
         channel=channel,
-        status=status,
-        memories=memories,
-        generation=generation,
-        agent_id=agent_id,
+        keys=keys,
     ).consume()
-
-
-def mark_returned(tx, event_id: str) -> None:
-    """The hook handed the block back to the harness.
-
-    Claude Code gives a hook no acceptance signal beyond its own exit, so
-    this is the strongest status the adapter can record. A ``prepared``
-    block without ``returned`` means the hook died before delivering it.
-    """
-    tx.run(RETURNED, event_id=event_id).consume()
-
-
-def mark_received(
-    tx,
-    session_id: str,
-    memories: list[dict],
-    generation: int,
-    main_context: bool = True,
-) -> None:
-    """Link delivered memories to the session and update what it has seen."""
-    if memories:
-        tx.run(
-            RECEIVED,
-            session_id=session_id,
-            memories=memories,
-            generation=generation,
-            main_context=main_context,
-        ).consume()

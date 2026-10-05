@@ -30,7 +30,7 @@ chapter:
 | Time | `started_at`, `ended_at` | `source_start`, `source_end` from event timestamps, separate from `created_at`; ages and `since` use `source_end` |
 | Concurrency | Idempotent watermark | Per-session lease, fixed window, summary version checked at commit, ids derived from window and position, project tail updated under a lock |
 | Readiness | Not addressed | A window is ready only once its closing event is committed |
-| Recall bookkeeping | `INJECTED_IN`, reset on clear or compact | `INJECTED_IN` and `INJECTED_AT` carrying version, detail level, context generation, and status; the rendered block kept on the delivery event; `search_episodic` and `expand_episodic` results recorded too |
+| Recall bookkeeping | `INJECTED_IN`, reset on clear or compact | `INJECTED_AT` from each delivered memory to the event that carried it, with the rendered block kept on that event; every `SessionStart` gets its own recap and record, with no duplicate suppression; `search_episodic` and `expand_episodic` results recorded too |
 | Recap | Three session one-liners | Recent sessions and recent activity, the historical-record framing, and a tool hint |
 | Prompt-time recall | Episodes injected beside each prompt | None: the session-start recap and the tools are the only recall paths |
 | Tools | `memory_search`, `memory_expand` | `search_episodic` and `expand_episodic`, on a `memory` server that also hosts the read-only graph tools |
@@ -50,7 +50,6 @@ chapter:
 (:Session)-[:HAS_SUMMARY]->(:SessionSummary)
 (:ExtractionRun)-[:PROCESSED_EVENT]->(:SessionEvent)
 (:ExtractionRun)-[:PRODUCED]->(:Observation)
-(:Observation|SessionSummary)-[:INJECTED_IN]->(:Session)
 (:Observation|SessionSummary)-[:INJECTED_AT]->(:SessionEvent)
 (:Observation)-[:CITES]->(:Observation|SessionSummary)
 (:DisplayIdCounter {prefix, value})               // hands out o112, s41
@@ -63,8 +62,8 @@ extraction should "retain the originating memory references".
 |---|---|
 | `User` | `user_id` |
 | `Project` | `id`, `name` |
-| `Session` | `project_id`, `display_id` (`s41`), `context_generation`, `extraction_lease_owner`, `extraction_lease_until`; `user_id` becomes write-once |
-| `SessionEvent` | `prompt_id` and, on a failed tool call, `tool_error` ([3](#3-capture-changes)); on delivery events: `recall_block`, `recall_channel`, `recall_status` |
+| `Session` | `project_id`, `display_id` (`s41`), `extraction_lease_owner`, `extraction_lease_until`; `user_id` becomes write-once |
+| `SessionEvent` | `prompt_id` and, on a failed tool call, `tool_error` ([3](#3-capture-changes)); on delivery events: `recall_block`, `recall_channel` |
 | `Observation` | `id`, `display_id` (`o112`), `project_id`, `session_id`, `type`, `title`, `narrative`, `source_start`, `source_end`, `created_at`, `embedding` |
 | `SessionSummary` | `id`, `session_id`, `project_id`, `version`, `headline`, `request`, `progress`, `outcome`, `source_start`, `source_end`, `created_at`, `updated_at`, `embedding` |
 | `ExtractionRun` | `id`, `status`, `session_id`, `window_key`, `llm_model`, `event_count`, `created_at`, `input_summary_version`, `input_summary_json`, `output_summary_version`, `output_summary_json`, `input_excerpts_json`, `input_chars`, `input_trim_json`, `error` |
@@ -123,19 +122,13 @@ In `hooks/common.py`:
   otherwise the resolution chapter 2 already uses. A shared deployment
   sets the same id on each of a person's machines.
 - **Anchors** (implemented). When `_append_event` creates a session, it
-  sets `user_id`, `project_id`, and `context_generation: 1`, and it keeps
-  them afterwards with `coalesce` (chapter 2's code overwrote `user_id` on
+  sets `user_id` and `project_id`, and it keeps them afterwards with `coalesce` (chapter 2's code overwrote `user_id` on
   every event). It MERGEs `(:User)-[:HAS_SESSION]->(s)` and
   `(:Project)-[:HAS_SESSION]->(s)` from the stored values, only while they
   are missing. A session therefore keeps one owner and one project even if
   a later event resolves differently. Sessions captured before this change
   pick up their anchors on their next event, and the extraction worker
   backfills any session it processes.
-- **Context generation** (implemented). The append that creates a
-  `SessionStart` event with source `compact` or `clear` in a session that
-  already has events increments `context_generation`. The content hash
-  makes that append happen once, whichever of the three SessionStart hooks
-  lands first.
 - **Schema check** (implemented). Capture now checks its four constraints
   with one `SHOW CONSTRAINTS` and creates only the missing ones. Before,
   it ran one `CREATE CONSTRAINT` per constraint on every event.
@@ -158,7 +151,7 @@ In `hooks/common.py`:
   run takes about 160 ms against a local database. The hook prints
   nothing, so the original text is shown.
 - **Tool results** stay unstored. Recording what the memory tools returned
-  belongs to recall, in [5.2](#52-delivery-records-and-duplicate-suppression).
+  belongs to recall, in [5.2](#52-delivery-records).
 
 ## 4. Extraction
 
@@ -392,10 +385,10 @@ cached.
 The recap runs on every `SessionStart` source, next to the system-prompt
 hook.
 
-- **Context generation.** `compact` increments
-  `Session.context_generation`, and so does `clear` when the harness keeps
-  the session id. A new session starts at 1. `resume` keeps the
-  generation, since the transcript replays what was delivered.
+- **Every source gets a recap.** A resume, clear, or compact fires
+  `SessionStart` again, and the hook builds the block afresh. Nothing
+  tracks what an earlier context saw: the block is small, and after a
+  clear or compact the earlier one is gone from the context anyway.
 - **Selection** needs no model call. It takes up to three other sessions
   in the project that have a summary, and up to five observations from
   other sessions, newest `source_end` first in both cases; observations
@@ -437,50 +430,38 @@ A returning user's own session gets one more line under its row:
 
 An empty project gets no block.
 
-### 5.2 Delivery records and duplicate suppression
+### 5.2 Delivery records
 
-A delivery is identified by memory id, version, detail level, and context
-generation. The detail level is `title` for a row and `full` for an opened
-record, and `full` covers `title`. Observations are immutable, so their
-deliveries carry version 1; only summaries advance.
+Whatever a recall hook injects is recorded on the event that carried it,
+following chapter 2's pattern of appending the event and setting
+properties on it:
 
-- **Suppression.** A candidate is skipped only when the session has already
-  received the same memory in the current generation, at the same or a
-  later version and at the same or greater detail. So a title never blocks
-  the full account, a new summary version is delivered again, and after a
-  compaction useful memory can come back.
-- **Recording** follows chapter 2's injection pattern of appending the
-  event and setting properties on it:
-  1. Append the carrying `SessionStart` event. Set `recall_block` to the
-     exact rendered text, `recall_channel` to `recap`, and
-     `recall_status` to `prepared`.
-  2. Create
-     `(memory)-[:INJECTED_AT {version, detail, context_generation, channel, status}]->(event)`
-     for each delivered memory. These relationships are the audit of the
-     delivery.
-  3. Return the block, then set `recall_status` (and the `INJECTED_AT`
-     status) to `returned`. Claude Code gives a hook no acceptance signal
-     beyond its own exit, so `returned` is the strongest status this
-     adapter can record. A `prepared` block without `returned` means the
-     hook died before delivering it.
-  4. MERGE `(memory)-[:INJECTED_IN]->(session)` and set the suppression
-     state on it (`version`, `detail`, `context_generation`). This
-     relationship answers "which sessions received this account?".
-     **Decision:** this step comes after the return, so a block the hook
-     never delivered cannot suppress a later delivery. The state keeps the
-     newest version delivered in the generation, at the most detail
-     delivered for that version.
+1. Append the carrying event (`SessionStart` for the recap). Set
+   `recall_block` to the exact rendered text and `recall_channel` to
+   `recap`.
+2. MERGE `(memory)-[:INJECTED_AT]->(event)` for each memory the block
+   names. The relationship has no properties: the block on the event
+   says what was shown, and the memory node is the current record.
+3. Return the block.
+
+"Which sessions received this account?" is one `HAS_EVENT` hop from the
+events. "What was delivered during this window?" is the `INJECTED_AT`
+links on the window's events, which is how extraction lists recalled
+memory for its prompt and checks `cites`.
+
+**Decision:** the record is written before the block is returned, in one
+transaction. Claude Code gives a hook no acceptance signal, so no status
+can prove delivery. A hook killed between the write and its exit leaves a
+record of a block the session never saw; with a recap that returns in
+about 0.2 seconds against a 5-second budget, that is accepted.
+
 - **Tool deliveries.** A `PostToolUse` entry, matched to the memory
   server's `search_episodic` and `expand_episodic`, records what those
-  tools returned. It appends the same event, stores the response text on
-  it as `recall_block` (bounded at 8,000 characters), and parses the
-  display ids. It then records `INJECTED_AT` and `INJECTED_IN` with the
-  channel `search` (detail `title`) or `expand` (`full` for the opened
-  record, `title` for its neighbor rows; an `events=true` page opens no
-  record in full). **Decision:** a delivery inside a subagent (the payload
-  carries `agent_id`) goes into the subagent's context, not the main one,
-  so it is recorded, with `agent_id` on `INJECTED_AT`, but never changes
-  the main context's suppression state.
+  tools returned the same way: the response text as `recall_block`
+  (bounded at 8,000 characters), `recall_channel` `search` or `expand`,
+  and `INJECTED_AT` from every memory whose display id the response
+  names. A subagent's call is recorded like any other; its event carries
+  the `agent_id`.
 
 ## 6. MCP server
 
@@ -642,7 +623,7 @@ off as the completion.
 
 | File | Change | Status |
 |---|---|---|
-| `hooks/common.py` | Project and user resolution with overrides; write-once owner and project anchors in `_append_event`; context generation; new constraints, one-query schema check, and env keys | Done |
+| `hooks/common.py` | Project and user resolution with overrides; write-once owner and project anchors in `_append_event`; new constraints, one-query schema check, and env keys | Done |
 | `hooks/log_event.py` | Keeps `prompt_id`, and a failed call's reason as `tool_error` | Done |
 | `hooks/episodes.py` | New: schema and indexes, retrieval (recent records, hybrid search with normalized score fusion, expand queries), row rendering, display-id resolution, recap selection, delivery recording | Done |
 | `hooks/extract_memory.py` | New: the `Stop` and `SessionEnd` trigger, the `SessionStart` sweep, and the worker | Done |
@@ -679,8 +660,8 @@ UAM_TEST_DATABASE=uamtest uv run --with pytest --with neo4j pytest tests
    leaves the result unknown.
 6. Unrelated work by another session between two turns joins the project
    timeline, but not the first session's observations or summary.
-7. A title delivered by the recap does not suppress a later
-   `expand_episodic` of the same record.
+7. A compacted session gets a fresh recap, recorded on its own
+   `SessionStart` event.
 8. Rerunning a completed window adds nothing.
 9. Offered a similar case from another pipeline, the agent checks whether
    it applies before recommending the same fix. This check is judged, not
@@ -731,7 +712,7 @@ delivered blocks are on their events.
 5. **Tool results.** Chapter 2 stores no tool results, while chapter 3
    asks to record what `search_episodic` and `expand_episodic` returned.
    This design stores only the memory tools' responses, on the recall side
-   ([5.2](#52-delivery-records-and-duplicate-suppression)). One sentence
+   ([5.2](#52-delivery-records)). One sentence
    in the chapter would make that explicit.
 6. **The recording direction. Resolved in the chapter.** Chapter 3 used
    to call `INJECTED_IN` and `INJECTED_AT` "the same recording pattern
@@ -739,6 +720,9 @@ delivered blocks are on their events.
    points from the event to the prompt. The chapter now says only that
    recalled episodes follow chapter 2's rule (what entered a session is in
    the record). This design follows chapter 3's direction, from the memory.
+   `INJECTED_IN` is gone from both: the chapter and this design link each
+   recalled memory only to the event that carried it
+   ([5.2](#52-delivery-records)).
 7. **A shared database.** The development database is shared with the
    meta-knowledge-graph plugin and other applications. Beyond 43
    `Project {id, name}` nodes, it holds that plugin's constraints on

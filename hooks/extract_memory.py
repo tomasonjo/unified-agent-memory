@@ -232,8 +232,7 @@ RETURN s.project_id AS project, s.user_id AS owner, first.cwd AS cwd
 BACKFILL_ANCHORS = """
 MATCH (s:Session {session_id: $session_id})
 SET s.project_id = coalesce(s.project_id, $project),
-    s.user_id = coalesce(s.user_id, $owner),
-    s.context_generation = coalesce(s.context_generation, 1)
+    s.user_id = coalesce(s.user_id, $owner)
 WITH s
 FOREACH (_ IN CASE WHEN NOT EXISTS { (:User)-[:HAS_SESSION]->(s) }
                    THEN [1] ELSE [] END |
@@ -267,9 +266,9 @@ LIMIT 1
 
 RECALLED_IN_WINDOW = """
 UNWIND $event_ids AS event_id
-MATCH (m)-[r:INJECTED_AT]->(:SessionEvent {event_id: event_id})
+MATCH (m)-[:INJECTED_AT]->(e:SessionEvent {event_id: event_id})
 OPTIONAL MATCH (s:Session)-[:HAS_SUMMARY]->(m)
-WITH m, s, collect(DISTINCT r.channel) AS channels
+WITH m, s, collect(DISTINCT e.recall_channel) AS channels
 RETURN CASE WHEN m:Observation THEN m.display_id ELSE s.display_id END AS display_id,
        CASE WHEN m:Observation THEN m.type ELSE 'session' END AS type,
        CASE WHEN m:Observation THEN m.title ELSE m.headline END AS text,
@@ -277,7 +276,8 @@ RETURN CASE WHEN m:Observation THEN m.display_id ELSE s.display_id END AS displa
 """
 
 DELIVERED_TO_SESSION = """
-MATCH (m)-[:INJECTED_IN]->(:Session {session_id: $session_id})
+MATCH (:Session {session_id: $session_id})-[:HAS_EVENT]->(:SessionEvent)<-[:INJECTED_AT]-(m)
+WITH DISTINCT m
 OPTIONAL MATCH (s:Session)-[:HAS_SUMMARY]->(m)
 RETURN CASE WHEN m:Observation THEN m.display_id ELSE s.display_id END AS display_id
 """

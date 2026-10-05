@@ -284,16 +284,12 @@ def _ensure_session_schema(session) -> None:
 # kept afterwards: a session has one owner and one project even if a later
 # event resolves differently (a changed git email, a cd into another repo).
 # The anchors are MERGEd only while missing, which also gives sessions
-# captured before they existed their anchors on the next event. A
-# SessionStart that resets the context of an existing session (compact, or
-# clear when the harness keeps the session id) starts a new context
-# generation; recall uses it to tell what the current context has seen.
+# captured before they existed their anchors on the next event.
 APPEND_EVENT = """
 MERGE (s:Session {session_id: $session_id})
 ON CREATE SET s.created_at = datetime($timestamp)
 SET s.user_id = coalesce(s.user_id, $user_id),
     s.project_id = coalesce(s.project_id, $project_id),
-    s.context_generation = coalesce(s.context_generation, 1),
     s.harness = $harness,
     s.model = coalesce($model, s.model)
 WITH s
@@ -325,9 +321,6 @@ FOREACH (_ IN CASE WHEN prev IS NOT NULL THEN [1] ELSE [] END |
 FOREACH (_ IN CASE WHEN prev IS NULL THEN [1] ELSE [] END |
     CREATE (s)-[:FIRST_EVENT]->(e)
 )
-FOREACH (_ IN CASE WHEN prev IS NOT NULL AND $resets_context THEN [1] ELSE [] END |
-    SET s.context_generation = s.context_generation + 1
-)
 CREATE (s)-[:LATEST_EVENT]->(e)
 """
 
@@ -343,8 +336,6 @@ def _append_event(tx, event_props: dict, project: str, model: str | None) -> Non
         timestamp=event_props.get("timestamp"),
         event_id=event_props.get("event_id"),
         event_props=event_props,
-        resets_context=event_props.get("event_name") == "SessionStart"
-        and event_props.get("source") in ("compact", "clear"),
     ).consume()
 
 
