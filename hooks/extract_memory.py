@@ -1136,12 +1136,10 @@ def _embeddings(texts: list[str]) -> list | None:
 
 
 def _prepare_schema(db) -> None:
-    from llm import embedding_dimensions, embeddings_ready
+    from llm import embeddings_ready
 
     episodes.ensure_episode_schema(db)
-    episodes.ensure_retrieval_indexes(
-        db, embedding_dimensions() if embeddings_ready() else None
-    )
+    episodes.ensure_retrieval_indexes(db, embeddings_ready())
 
 
 def consolidate(session_ids: list[str]) -> None:

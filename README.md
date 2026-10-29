@@ -416,13 +416,12 @@ own hooks no-op inside it instead of capturing it or recursing.
 ### Episodic memory
 
 Episodic memory needs no setup beyond the database and the background LLM.
-Four optional settings change its defaults:
+Three optional settings change its defaults:
 
 ```
 UAM_USER_ID=maria@company.com       # pin the user key
 UAM_PROJECT_ID=renewal-analysis     # pin the project key
 UAM_EMBEDDING_MODEL=openai/text-embedding-3-small
-UAM_EMBEDDING_DIMENSIONS=1536       # must match the model
 ```
 
 The user key defaults to the logged-in account's email. Pin it in a shared
@@ -436,7 +435,10 @@ on the machine, so export it per repository instead; for Claude Code, use
 the `env` block of the repository's `.claude/settings.json`. An embedding
 model is a LiteLLM model string, paid for by its provider's key. The
 `claude-cli` backend has no embeddings, and without a model, search runs
-on stored text alone.
+on stored text alone. The vector index sets no size, so any model works.
+Vectors from two models cannot be compared, though, so after switching
+models the episodes embedded earlier no longer find useful similarity
+matches.
 
 Consolidation is the first background job that calls the LLM, once per
 turn. With the default `claude-cli` backend that is the `claude` CLI's own

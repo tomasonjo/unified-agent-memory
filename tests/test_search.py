@@ -9,7 +9,6 @@ from conftest import PROJECT
 
 pytestmark = pytest.mark.graph
 
-DIMENSIONS = 3
 QUERY = [1.0, 0.0, 0.0]
 
 # Six observations in another project sit closer to the query than this
@@ -42,7 +41,7 @@ def indexed(graph):
         "{`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}"
     ).consume()
     graph.session.run(SEED, project=PROJECT).consume()
-    episodes.ensure_retrieval_indexes(graph.session, DIMENSIONS)
+    episodes.ensure_retrieval_indexes(graph.session, vectors=True)
     yield graph
     graph.session.run(f"DROP INDEX {episodes.VECTOR_INDEX} IF EXISTS").consume()
 
@@ -58,6 +57,15 @@ def test_one_vector_index_replaces_the_per_label_ones(indexed):
     assert vector_indexes(indexed) == {
         "episode_embedding": ["Observation", "SessionSummary"]
     }
+
+
+def test_the_vector_index_sets_no_dimensions(indexed):
+    config = indexed.value(
+        "SHOW VECTOR INDEXES YIELD name, options WHERE name = $name "
+        "RETURN options.indexConfig",
+        name=episodes.VECTOR_INDEX,
+    )
+    assert config.get("vector.dimensions") is None
 
 
 def test_the_project_filter_runs_inside_the_index(indexed):

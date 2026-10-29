@@ -53,7 +53,7 @@ from neo4j import GraphDatabase  # noqa: E402
 
 import episodes  # noqa: E402
 from common import load_env, neo4j_config, project_id  # noqa: E402
-from llm import embed_texts, embedding_dimensions, embeddings_ready  # noqa: E402
+from llm import embed_texts, embeddings_ready  # noqa: E402
 
 load_env()
 uri, user, password, database = neo4j_config()
@@ -99,9 +99,8 @@ def _ensure_indexes(driver) -> None:
     global _indexes_checked
     if _indexes_checked:
         return
-    dimensions = embedding_dimensions() if embeddings_ready() else None
     with driver.session(database=database) as session:
-        episodes.ensure_retrieval_indexes(session, dimensions)
+        episodes.ensure_retrieval_indexes(session, embeddings_ready())
     _indexes_checked = True
 
 

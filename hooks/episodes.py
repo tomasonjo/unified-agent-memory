@@ -82,14 +82,15 @@ FULLTEXT_FIELDS = [
 ]
 
 # project_id is a filter property, so a search can filter by project
-# inside the index instead of after it (Neo4j 2026.01 or later).
+# inside the index instead of after it (Neo4j 2026.01 or later). The
+# index sets no vector.dimensions, so it takes whatever length the
+# embedding model returns.
 VECTOR_INDEX_QUERY = """
 CREATE VECTOR INDEX episode_embedding IF NOT EXISTS
 FOR (n:Observation|SessionSummary) ON n.embedding
 WITH [n.project_id]
-OPTIONS {{indexConfig: {{
-  `vector.dimensions`: {dimensions},
-  `vector.similarity_function`: 'cosine'}}}}
+OPTIONS {indexConfig: {
+  `vector.similarity_function`: 'cosine'}}
 """
 
 
@@ -149,12 +150,12 @@ def ensure_episode_schema(session) -> None:
             print(f"[uam] schema: {name} not created: {exc}", file=sys.stderr)
 
 
-def ensure_retrieval_indexes(session, dimensions: int | None = None) -> None:
+def ensure_retrieval_indexes(session, vectors: bool = False) -> None:
     """Create the retrieval indexes that are missing, then wait for them.
 
     Both indexes span both labels, so one call searches observations and
     summaries together. The vector index exists only when an embedding
-    model is configured; ``dimensions`` must match that model. Each
+    model is configured, which ``vectors`` reports. Each
     statement runs on its own, because schema commands do not compose
     into one transaction. Failures are reported rather than raised: search
     skips a leg whose index is missing. ``IF NOT EXISTS`` never updates an
@@ -163,11 +164,9 @@ def ensure_retrieval_indexes(session, dimensions: int | None = None) -> None:
     """
     _drop_stale_fulltext(session)
     statements = [(FULLTEXT_INDEX, FULLTEXT_INDEX_QUERY)]
-    if dimensions:
+    if vectors:
         _drop_legacy_vector(session)
-        statements.append(
-            (VECTOR_INDEX, VECTOR_INDEX_QUERY.format(dimensions=int(dimensions)))
-        )
+        statements.append((VECTOR_INDEX, VECTOR_INDEX_QUERY))
     for name, statement in statements:
         try:
             session.run(statement).consume()

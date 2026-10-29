@@ -71,7 +71,6 @@ DEFAULT_LLM_MODEL = "anthropic/claude-haiku-4-5"
 DEFAULT_CLAUDE_CLI_MODEL = "haiku"
 DEFAULT_CLAUDE_CLI_TIMEOUT = 300.0
 DEFAULT_NUM_RETRIES = 2
-DEFAULT_EMBEDDING_DIMENSIONS = 1536
 EMBEDDING_TIMEOUT_SECONDS = 10.0
 
 CLAUDE_CODE_CREDENTIAL_SERVICE = "Claude Code-credentials"
@@ -114,14 +113,6 @@ def embeddings_ready() -> bool:
     through LiteLLM and its provider key.
     """
     return bool(embedding_model())
-
-
-def embedding_dimensions() -> int:
-    """Vector size the indexes are created with; must match the model."""
-    try:
-        return int(os.getenv("UAM_EMBEDDING_DIMENSIONS") or DEFAULT_EMBEDDING_DIMENSIONS)
-    except ValueError:
-        return DEFAULT_EMBEDDING_DIMENSIONS
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:

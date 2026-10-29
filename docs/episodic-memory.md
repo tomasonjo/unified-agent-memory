@@ -83,8 +83,9 @@ The schema uses named constraints and indexes, like chapter 2's:
   the eight text fields in the chapter's index listing.
 - A vector index, `episode_embedding`, over `Observation|SessionSummary`
   on `embedding`, with `project_id` as a filter property. It is created
-  only when an embedding model is configured, sized by
-  `UAM_EMBEDDING_DIMENSIONS`, and needs Neo4j 2026.01 or later; on an
+  only when an embedding model is configured, sets no
+  `vector.dimensions`, so it takes the length the model returns, and
+  needs Neo4j 2026.01 or later; on an
   older server its creation fails and search runs on fulltext alone. The
   per-label `observation_embedding` and `summary_embedding` it replaces
   are dropped when found.
@@ -605,7 +606,6 @@ in place:
 | `UAM_USER_ID` | The resolved email | Pins the user key, so several addresses can map to one person |
 | `UAM_PROJECT_ID` | The main checkout's directory name | Pins the project key; export it per repository |
 | `UAM_EMBEDDING_MODEL` | Unset, so search is fulltext only | A LiteLLM embedding model, which needs its provider's key; the `claude-cli` backend cannot embed |
-| `UAM_EMBEDDING_DIMENSIONS` | `1536` | Must match the model; sizes the vector indexes |
 
 `hooks/llm.py` gains `embed_texts()` beside `llm_complete()`, and
 `embeddings_ready()` is true when a model is set. For consolidation it also

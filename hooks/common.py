@@ -513,7 +513,6 @@ ENV_KEYS = (
     "UAM_LLM_MODEL",
     "UAM_CLAUDE_CLI_MODEL",
     "UAM_EMBEDDING_MODEL",
-    "UAM_EMBEDDING_DIMENSIONS",
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
     "GEMINI_API_KEY",
@@ -555,11 +554,9 @@ ENV_TEMPLATE = """\
 # exporting it per repository. An embedding model (a LiteLLM model
 # string, paid for by its provider key) adds similarity search to the
 # memory tools and recall; without one they search stored text only.
-# The dimensions must match the model.
 # UAM_USER_ID=
 # UAM_PROJECT_ID=
 # UAM_EMBEDDING_MODEL=openai/text-embedding-3-small
-# UAM_EMBEDDING_DIMENSIONS=1536
 """
 
 
