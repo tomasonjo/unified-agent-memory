@@ -15,7 +15,8 @@ Resolution order:
    to link to. Creation only: an existing node is never modified here.
 2. The bundled ``hooks/default_system_prompt.md`` file, when the graph
    is unreachable.
-3. A minimal embedded constant, so the hook always has something to inject.
+
+If neither source yields a prompt, the hook injects nothing.
 
 When the prompt came from the graph, the SessionStart event is linked to
 the node, ``(event)-[:INJECTED_PROMPT {version}]->(prompt)``, with the
@@ -52,13 +53,6 @@ from log_event import build_event_props  # noqa: E402
 
 import os  # noqa: E402
 
-MINIMAL_FALLBACK_PROMPT = (
-    "You are a general-purpose AI agent with persistent memory. Treat "
-    "injected memory context as your starting state, lead with the user's "
-    "goal, and record durable facts and corrections so future sessions can "
-    "reuse them."
-)
-
 
 # Creation only: ON CREATE seeds the bundled default as v1, and there is
 # no SET outside it, so a node that already exists comes back untouched.
@@ -92,7 +86,9 @@ def fetch_prompt_from_neo4j(name: str) -> tuple[str, int | None] | None:
                 database_=database,
             )
             if not records:
-                seed = read_bundled_prompt() or MINIMAL_FALLBACK_PROMPT
+                seed = read_bundled_prompt()
+                if not seed:
+                    return None
                 driver.execute_query(
                     "CREATE CONSTRAINT IF NOT EXISTS FOR (p:SystemPrompt) "
                     "REQUIRE p.name IS UNIQUE",
@@ -130,8 +126,8 @@ def read_bundled_prompt() -> str | None:
     return content if content.strip() else None
 
 
-def resolve_prompt(name: str) -> tuple[str, str, int | None]:
-    """Return (content, source, version); source in {neo4j, bundled, embedded}."""
+def resolve_prompt(name: str) -> tuple[str, str, int | None] | None:
+    """Return (content, source, version); source in {neo4j, bundled}."""
     fetched = fetch_prompt_from_neo4j(name)
     if fetched:
         content, version = fetched
@@ -139,7 +135,7 @@ def resolve_prompt(name: str) -> tuple[str, str, int | None]:
     bundled = read_bundled_prompt()
     if bundled:
         return bundled, "bundled", None
-    return MINIMAL_FALLBACK_PROMPT, "embedded", None
+    return None
 
 
 def main() -> int:
@@ -157,7 +153,14 @@ def main() -> int:
             payload = {}
 
         name = os.getenv("UAM_AGENT_NAME", "default")
-        prompt, source, version = resolve_prompt(name)
+        resolved = resolve_prompt(name)
+        if resolved is None:
+            print(
+                f"[inject_system_prompt] no prompt for {name!r}; injecting nothing",
+                file=sys.stderr,
+            )
+            return 0
+        prompt, source, version = resolved
         session_id = str(payload.get("session_id") or "unknown")
         print(
             f"[inject_system_prompt] injecting {name!r} from {source} "

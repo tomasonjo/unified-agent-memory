@@ -176,10 +176,10 @@ Code places at the start of the conversation. Resolution order:
 
 1. Neo4j `(:SystemPrompt {name})`, name from `UAM_AGENT_NAME`
    (default `default`), when a graph is reachable,
-2. the bundled `hooks/default_system_prompt.md`,
-3. a minimal embedded constant.
+2. the bundled `hooks/default_system_prompt.md`.
 
-Any failure falls through to the next source; the hook never blocks a
+Any failure falls through to the next source, and if neither yields a
+prompt the hook injects nothing; the hook never blocks a
 session, and the Neo4j lookup uses a short connection timeout so an
 unreachable database cannot stall startup. What it injected it records
 on the session's `SessionStart` event, full text included.
