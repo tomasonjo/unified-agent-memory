@@ -11,7 +11,7 @@ system, one piece per chapter of the book it accompanies:
 2. **System prompt injection.** At session start the plugin injects a
    system prompt as additional context. It ships with a bundled default
    that is harness-agnostic and use-case-agnostic, and it can instead fetch
-   a versioned prompt from a `(:SystemPrompt)` node in Neo4j, so the prompt
+   the prompt from a `(:SystemPrompt)` node in Neo4j, so the prompt
    becomes data you manage rather than text baked into the harness.
 3. **Episodic consolidation.** After each turn, a background worker reads
    the turn's captured events once and writes *episodes*: observations
@@ -22,14 +22,9 @@ system, one piece per chapter of the book it accompanies:
    activity, and the `memory` MCP server lets the agent search and open
    episodes on its own.
 
-It also ships three skills. `/orchestrate` turns the agent into a subagent
+It also ships one skill. `/orchestrate` turns the agent into a subagent
 orchestrator: recall memory before the work starts, route the relevant
 slice into each phase, and record what was learned at the end.
-`/seed-prompt` publishes the system prompt to the graph as a versioned
-node, on explicit request only, checking what the graph already holds
-and confirming with you before it writes. `recall` teaches the agent to
-read memory at the smallest useful level: rows first, one record when it
-matters, source events only when a detail is in doubt.
 
 And it mounts memory back into the session as tools: `mcp.json` runs the
 plugin's own `memory` MCP server. It offers `search_episodic` and
@@ -37,7 +32,7 @@ plugin's own `memory` MCP server. It offers `search_episodic` and
 read-only proxy of the
 [official Neo4j MCP server](https://github.com/neo4j/mcp), it also offers
 schema introspection and read Cypher over the same graph the hooks push
-into. The write path stays with the hooks and the seed skill.
+into. The write path stays with the hooks.
 
 This repo is the companion to the plugin and episodic-memory chapters of
 the book: [docs/episodic-memory.md](docs/episodic-memory.md) turns the
@@ -65,16 +60,13 @@ hooks/
 skills/
   orchestrate/
     SKILL.md             # on-demand skill: subagent orchestration
-  seed-prompt/
-    SKILL.md             # on-demand skill: check the graph, confirm, publish the prompt
-    scripts/seed_system_prompt.py  # status + versioned write of the prompt node
-  recall/
-    SKILL.md             # on-demand skill: reading memory at the right level of detail
 mcp/
   server.py              # the "memory" server: episodic and read-only graph tools
 mcp.json                 # mounts the server above under the name "memory"
 docs/
   episodic-memory.md     # episodic memory design (chapter 3)
+examples/
+  sales-data/            # the invented sales data the book's agents query
 tests/                   # consolidation and recall against a scratch database
 ```
 
@@ -115,6 +107,17 @@ Give memory a database of its own. Capture anchors sessions to `User` and
 applications use too; set `NEO4J_DATABASE` to a dedicated database rather
 than sharing one.
 
+## Sample data
+
+The book's examples query an invented B2B software company's sales data.
+[examples/sales-data/](examples/sales-data/README.md) generates it
+deterministically and loads it into Neo4j:
+
+```
+uv run --script examples/sales-data/seed_sales_data.py --dry-run
+uv run --script examples/sales-data/seed_sales_data.py
+```
+
 ## What each hook does
 
 **`log_event.py`** runs on every event, reads the hook payload from stdin,
@@ -135,10 +138,9 @@ shape the record. Tool results are not stored: they are the bulk of a
 session and regenerable, so the record keeps only that the tool ran, what
 it was asked, and how many characters came back (`tool_response_chars`).
 Inputs are stored: prompts, tool inputs, and the agent's responses (each
-bounded at 8,000 characters), a failed call's reason (1,000), and what the injection
-hook injected, recorded on the `SessionStart` event itself (`prompt_name`,
-`prompt_source`, `prompt_version`, and the full `prompt_content`), so a
-session can be reproduced from its record. The agent's responses arrive
+bounded at 8,000 characters), a failed call's reason (1,000), and which
+prompt the injection hook injected, recorded on the `SessionStart` event
+itself (`prompt_name` and `prompt_source`). The agent's responses arrive
 two ways: each `Stop` carries the turn's final response, and
 `MessageDisplay` carries every response as it streams to the screen,
 including the intermediate responses written between tool calls, one
@@ -178,11 +180,16 @@ Code places at the start of the conversation. Resolution order:
    (default `default`), when a graph is reachable,
 2. the bundled `hooks/default_system_prompt.md`.
 
-Any failure falls through to the next source, and if neither yields a
-prompt the hook injects nothing; the hook never blocks a
-session, and the Neo4j lookup uses a short connection timeout so an
-unreachable database cannot stall startup. What it injected it records
-on the session's `SessionStart` event, full text included.
+On an empty graph the hook first creates the node from the bundled
+default, `{name, content, created_at}`, and it never changes an existing
+node. Any failure falls through to the next source, and if neither yields
+a prompt the hook injects nothing; the hook never blocks a session, and
+the Neo4j lookup uses a short connection timeout so an unreachable
+database cannot stall startup. It records the prompt's name and source on
+the session's `SessionStart` event. A prompt served from the graph is also
+linked, `(:SessionEvent)-[:INJECTED_PROMPT]->(:SystemPrompt)`, so the
+event points at the text instead of copying it. A bundled prompt has no
+node to link to.
 
 **`extract_memory.py`** consolidates. On `Stop` and `SessionEnd` it starts
 a detached worker and returns in about a tenth of a second, so the model
@@ -254,33 +261,6 @@ phases, and record lessons when the last phase lands. Capture needs no
 help from the skill: `SubagentStart` and `SubagentStop` are among the
 events `log_event.py` already writes down.
 
-**`seed-prompt`** shows the other thing a skill can carry: an
-executable. Its `SKILL.md` is a few lines of discipline; the work lives
-in a bundled script run through uv like the injection hook, because it
-talks to the same graph. It is the write side of the prompt story, and
-it looks before it writes. Invoked explicitly (`/seed-prompt`), the
-skill first runs the script with `--status`, a read-only flag that
-reports what the graph already holds (no node yet, identical content,
-or content that differs and would bump the version), relays that to the
-user, and asks before creating or overwriting anything. Only on an
-explicit yes does it seed:
-
-```
-uv run --script skills/seed-prompt/scripts/seed_system_prompt.py --status
-uv run --script skills/seed-prompt/scripts/seed_system_prompt.py
-uv run --script skills/seed-prompt/scripts/seed_system_prompt.py reviewer --file path/to/reviewer.md
-```
-
-The node keeps `content`, `version`, `created_at`, and `updated_at`.
-Re-seeding identical content is a no-op; changed content bumps `version`.
-The prompt is static at runtime (the SessionStart hook only reads it), but
-it does not have to stay static between sessions: seed a new version, and
-every later session starts from it. Because this is the write path for
-the instructions every future session starts from, the skill runs only on
-explicit request and reports the version transition it caused. That
-property is what later chapters build on, when the prompt starts being
-revised from accumulated memory instead of by hand.
-
 The skill format and the pairing of memory hooks with skills follow
 [claude-mem](https://github.com/thedotmack/claude-mem), whose `do` and
 `mem-search` skills are worth reading.
@@ -335,7 +315,7 @@ The server is read-only by construction. It pins
 `NEO4J_MCP_READ_ONLY=true` for the Neo4j server, which then never
 announces its `write-cypher` tool at all. That is enforcement at the
 server, stronger than a harness-side permission, and the episodic tools
-only read. Writing belongs to the hooks and the seed-prompt skill. The
+only read. Writing belongs to the hooks. The
 Neo4j server sees only the settings passed to it. Its anonymous usage
 telemetry is on by default; export `NEO4J_MCP_TELEMETRY=false` to turn it
 off.
@@ -469,8 +449,9 @@ Resolution rules:
   another having run: a hook that needs an event in the graph appends it
   itself, and the content hash makes that the same node capture writes.
 - **Store what went in, not what came out.** The record keeps every input
-  a session received, injected instructions included, in full, and drops
-  tool results down to their size. Inputs are what reproduction and later
+  a session received and drops tool results down to their size. Injected
+  instructions are kept by reference: the `SessionStart` event links to
+  the prompt node that holds them. Inputs are what reproduction and later
   memory extraction need; outputs are bulk that any tool can regenerate.
 - **Never crash the session.** Hooks exit 0 on every error path and report
   problems to stderr. Memory is infrastructure; losing an event or falling
@@ -489,8 +470,7 @@ Resolution rules:
   Cypher. The Neo4j server inside it is pinned read-only, so it never
   even announces a write tool. Every
   write into the graph goes through code — capture, injection's record,
-  consolidation, recall's records, the seed skill — never through the
-  model's judgment.
+  consolidation, recall's records — never through the model's judgment.
 - **Interpret once, in the background.** Every session could ask a model
   to reconstruct past work from raw events, and each would do it
   differently. Consolidation does it once per turn, stores the account
@@ -512,4 +492,18 @@ connection comes from the env file as for the hooks:
 
 ```
 UAM_TEST_DATABASE=uamtest uv run --with pytest --with neo4j pytest tests
+```
+
+## Upgrading an existing graph
+
+Earlier versions copied the injected prompt onto each `SessionStart`
+event (`prompt_content`, `prompt_version`), put a `version` on
+`INJECTED_PROMPT`, and kept `version` and `updated_at` on the prompt
+node. To bring a graph written by them in line, run once:
+
+```
+MATCH ()-[r:INJECTED_PROMPT]->() REMOVE r.version;
+MATCH (e:SessionEvent) WHERE e.prompt_content IS NOT NULL
+REMOVE e.prompt_content, e.prompt_version;
+MATCH (p:SystemPrompt) REMOVE p.version, p.updated_at;
 ```

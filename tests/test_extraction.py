@@ -147,7 +147,9 @@ def test_the_next_turn_adds_an_observation_and_a_summary_version(graph, model):
     em.consolidate(["s-maria"])
 
     user = scripted.calls[0][1]["content"]
-    assert "Earlier in this session" in user  # the opening prompt, as an excerpt
+    window = user.split("Messages in the completed work window:\n", 1)[1]
+    window = window.split("\n\nPrevious session summary:", 1)[0]
+    assert "Investigate the apparent drop" not in window  # earlier turns: the summary
     assert "Historical reports that cross March 3 are not yet checked." in user
     assert "yes, commit it" not in user  # the side agent's guess is not work
 

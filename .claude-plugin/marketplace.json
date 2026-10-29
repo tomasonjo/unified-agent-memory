@@ -1,10 +1,8 @@
 {
   "name": "uam",
+  "description": "Unified Agent Memory plugin marketplace",
   "owner": {
     "name": "Tomaz Bratanic"
-  },
-  "metadata": {
-    "description": "Unified Agent Memory plugin marketplace"
   },
   "plugins": [
     {

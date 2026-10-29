@@ -146,10 +146,12 @@ def main() -> int:
         load_env()
         raw = sys.stdin.read()
         data = json.loads(raw) if raw.strip() else {}
-        append_session_event(
-            str(data.get("session_id") or "unknown"),
-            str(data.get("hook_event_name") or "unknown"),
-            build_event_props(data),
+        session_id = str(data.get("session_id") or "unknown")
+        event_name = str(data.get("hook_event_name") or "unknown")
+        append_session_event(session_id, event_name, build_event_props(data))
+        print(
+            f"[log_event] captured {event_name} for session {session_id}",
+            file=sys.stderr,
         )
     except Exception as exc:  # hook must never crash the session
         print(f"[log_event] error: {exc}", file=sys.stderr)

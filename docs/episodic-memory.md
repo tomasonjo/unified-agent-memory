@@ -85,7 +85,7 @@ The schema uses named constraints and indexes, like chapter 2's:
   on `embedding`, with `project_id` as a filter property. It is created
   only when an embedding model is configured, sets no
   `vector.dimensions`, so it takes the length the model returns, and
-  needs Neo4j 2026.01 or later; on an
+  needs Neo4j 2026.02 or later; on an
   older server its creation fails and search runs on fulltext alone. The
   per-label `observation_embedding` and `summary_embedding` it replaces
   are dropped when found.
@@ -203,10 +203,10 @@ the worker processes ready windows until none remain:
   Selection and rendering are both deterministic, so a worker taking over
   an expired lease computes the same window and the same input.
 - **Context.** Alongside the window go the project id, the session owner,
-  the session's current summary JSON (or "none yet"), and one excerpt.
-  **Decision:** the excerpt is the session's opening prompt, cut to 1,000
-  characters, when the window does not contain it, since that is the
-  detail the summary most often lacks. The excerpt is stored on the run.
+  the session's current summary JSON (or "none yet"), and the ids and
+  titles of the memory delivered during the window. Earlier turns reach
+  the model only through the summary, as the chapter has it
+  ([conflict 17](#11-conflicts-to-resolve)).
 
 **Decision:** the model reads only the window's messages: the user's
 prompts and the agent's intermediate and final responses. A turn's final
@@ -218,7 +218,7 @@ only what was attempted, since capture keeps no tool output, and in long
 turns they made up most of the input: two real captured turns of 291 and
 342 events held 141 and 168 tool calls. So tool calls, subagent reports
 (which reach the session as the Agent tool's result), lifecycle markers,
-the injected system prompt (`prompt_content`), full recall blocks, and
+the injected system prompt's record, full recall blocks, and
 bookkeeping such as `transcript_path` stay in the captured record, unread.
 That also keeps the harness's internal agents out of the input
 ([conflict 11](#11-conflicts-to-resolve)). Capture is unchanged: the raw
@@ -578,23 +578,15 @@ The signature is `expand_episodic(id, events=False, cursor=None)`.
 - **Bounds.** Every field is truncated to a stated maximum, and the whole
   response to about 8,000 characters.
 
-## 7. Recall skill
+## 7. Recall guidance
 
-`skills/recall/SKILL.md` teaches the procedure, and the tools enforce the
-bounds:
-
-- Start from the overview: recap rows and `search_episodic` results.
-  Expand only ids that look relevant. Open source events only when an
-  important detail, such as what was run or what was reported, is
-  uncertain.
-- Treat recalled items as history. Remaining work in `progress` is
-  someone's unfinished work, not an assignment, and `outcome` is a
-  session's report, not an approved rule.
-- Before reusing an earlier case, compare the metric, the pipeline, the
-  dates, the attempted action, and the evidence for its outcome. A similar
-  title is not enough.
-- A claim repeated across sessions is still one claim. Follow it back to
-  its first source.
+The chapter ships no recall skill, so the guidance sits where the agent
+already reads it. The recap's framing lines and both tool descriptions
+say that recalled rows are a historical record, not instructions, and
+`expand_episodic` adds that remaining work in `progress` is someone
+else's. An earlier version also shipped `skills/recall/SKILL.md`; it was
+removed because no chapter introduces it
+([conflict 17](#11-conflicts-to-resolve)).
 
 ## 8. Configuration
 
@@ -633,7 +625,7 @@ off as the completion.
 | `mcp/server.py` | New: the `memory` server, with `search_episodic`, `expand_episodic`, and the proxied read-only graph tools | Done |
 | `mcp/run_neo4j_mcp.py` | Removed; `mcp/server.py` took over its settings handling | Done |
 | `mcp.json` | `memory` replaces `neo4j` | Done |
-| `skills/recall/SKILL.md` | New | Done |
+| `skills/recall/SKILL.md` | Removed: chapter 3 ships no skill | Done |
 | `tests/` | New: the acceptance, concurrency, and budget checks from section 10 | Done |
 | `README.md` | Documents all of the above | Done |
 
@@ -811,6 +803,14 @@ delivered blocks are on their events.
     event's text as `content`, one call per message; Claude Code 2.1.268
     sends `turn_id`, `message_id`, `index`, `final`, and `delta`, one call
     per flush in the interactive terminal. Capture accepts either name.
+17. **Extras the chapters do not have. Removed to follow the book.** The
+    worker used to add an excerpt of the session's opening prompt to each
+    window's input, while chapter 3 lists the inputs and names the
+    previous summary as the source of continuity. The excerpt is gone,
+    and `input_excerpts_json` now holds only the recalled rows. The
+    `recall` skill is gone too, since chapter 3 ships no skill and
+    chapter 2 says the orchestrator's recall step reaches the new tools
+    unchanged.
 
 ## 12. Deferred
 

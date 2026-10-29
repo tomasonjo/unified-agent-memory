@@ -97,7 +97,6 @@ MESSAGE_FLOOR = 1_500
 # A reassembled intermediate response, like every message capture stores.
 MESSAGE_CHARS = 8_000
 TRUNCATION_MARKER = re.compile(r"\.\.\.\[truncated \d+ chars\]")
-OPENING_EXCERPT_CHARS = 1_000
 RECALLED_ROWS = 12
 
 OUTPUT_TOKENS = 8_000
@@ -254,14 +253,6 @@ OPTIONAL MATCH (s)-[:FIRST_EVENT]->(first:SessionEvent)
 RETURN s.project_id AS project, s.user_id AS owner,
        sum {.id, .version, .headline, .request, .progress, .outcome} AS summary,
        first.timestamp AS session_start
-"""
-
-OPENING_PROMPT = """
-MATCH (:Session {session_id: $session_id})-[:HAS_EVENT]->(e:SessionEvent)
-WHERE e.event_name = 'UserPromptSubmit' AND e.prompt IS NOT NULL
-RETURN e.event_id AS event_id, e.prompt AS prompt
-ORDER BY e.timestamp
-LIMIT 1
 """
 
 RECALLED_IN_WINDOW = """
@@ -609,8 +600,6 @@ class Context:
     owner: str
     summary: dict | None
     session_start: object
-    opening: str | None = None
-    opening_event_id: str | None = None
     recalled: list[dict] = field(default_factory=list)
     citable: set[str] = field(default_factory=set)
 
@@ -628,13 +617,8 @@ def summary_json(fields: dict | None) -> str | None:
     return json.dumps(fields, ensure_ascii=False, sort_keys=True) if fields else None
 
 
-def user_message(context: Context, window_text: str, opening: str | None) -> str:
+def user_message(context: Context, window_text: str) -> str:
     parts = [f"Project: {context.project}\nSession owner: {context.owner}"]
-    if opening:
-        parts.append(
-            "Earlier in this session, before this window (an excerpt of its "
-            "opening prompt):\n" + opening
-        )
     if context.recalled:
         rows = []
         for row in context.recalled[:RECALLED_ROWS]:
@@ -841,10 +825,6 @@ class Worker:
             session_start=row["session_start"],
         )
         ids = [e["event_id"] for e in events]
-        opening = _rows(self.db, OPENING_PROMPT, session_id=self.session_id)
-        if opening and opening[0]["event_id"] not in ids:
-            context.opening = episodes.clip(opening[0]["prompt"], OPENING_EXCERPT_CHARS)
-            context.opening_event_id = opening[0]["event_id"]
         context.recalled = [
             row for row in _rows(self.db, RECALLED_IN_WINDOW, event_ids=ids)
             if row["display_id"]
@@ -914,9 +894,8 @@ class Worker:
 
     def process(self, window: list[dict], key: str, feedback) -> Outcome:
         context = self.context(window)
-        opening = context.opening
         instructions = INSTRUCTIONS
-        frame = user_message(context, "", opening)
+        frame = user_message(context, "")
         budget = INPUT_CHARS - len(instructions) - len(frame) - 400
         rendered = render_window(window, budget)
         if rendered is None:
@@ -931,7 +910,7 @@ class Worker:
             except Stale as exc:
                 return Outcome("stale", str(exc))
             return Outcome("lifecycle")
-        prompt = user_message(context, rendered.text, opening)
+        prompt = user_message(context, rendered.text)
         if feedback:
             prompt += (f"\n\nYour previous response was rejected: {feedback}. "
                        "Return corrected JSON only.")
@@ -1017,11 +996,6 @@ class Worker:
                 obs["embedding"] = vector
         summary_embedding = embeddings[-1] if embeddings and summary else None
         excerpts = {}
-        if context.opening:
-            excerpts["opening_prompt"] = {
-                "event_id": context.opening_event_id,
-                "text": context.opening,
-            }
         if context.recalled:
             excerpts["recalled"] = [
                 {k: row.get(k) for k in ("display_id", "type", "text", "channels")}

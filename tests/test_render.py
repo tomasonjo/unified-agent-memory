@@ -46,10 +46,10 @@ def test_whole_input_stays_within_thirty_thousand_characters():
     events = big_turn(400)
     context = em.Context("s1", "renewal-analysis", "maria@company.com", None, None)
     instructions = em.INSTRUCTIONS
-    frame = em.user_message(context, "", None)
+    frame = em.user_message(context, "")
     budget = em.INPUT_CHARS - len(instructions) - len(frame) - 400
     rendered = em.render_window(events, budget)
-    total = len(instructions) + len(em.user_message(context, rendered.text, None))
+    total = len(instructions) + len(em.user_message(context, rendered.text))
     assert total <= em.INPUT_CHARS
 
 

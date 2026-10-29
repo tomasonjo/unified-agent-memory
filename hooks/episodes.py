@@ -82,7 +82,7 @@ FULLTEXT_FIELDS = [
 ]
 
 # project_id is a filter property, so a search can filter by project
-# inside the index instead of after it (Neo4j 2026.01 or later). The
+# inside the index instead of after it (Neo4j 2026.02 or later). The
 # index sets no vector.dimensions, so it takes whatever length the
 # embedding model returns.
 VECTOR_INDEX_QUERY = """
@@ -311,8 +311,14 @@ def render_row(row: dict, now: datetime | None = None) -> str:
     return clip(" · ".join(parts), ROW_CHARS)
 
 
-def render_rows(rows: list[dict], now: datetime | None = None) -> str:
-    return "\n".join(render_row(row, now) for row in rows)
+def render_rows(
+    rows: list[dict], older: str | None = None, now: datetime | None = None
+) -> str:
+    """The rows, then ``older``, the call that lists the page before them."""
+    lines = [render_row(row, now) for row in rows]
+    if older:
+        lines.append(older)
+    return "\n".join(lines)
 
 
 def _observation_row(o: dict) -> dict:

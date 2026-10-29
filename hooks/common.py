@@ -465,13 +465,11 @@ def set_event_props(event_id: str, props: dict) -> None:
             session.execute_write(_set_props)
 
 
-def link_event_to_prompt(event_id: str, prompt_name: str, version: int | None) -> None:
+def link_event_to_prompt(event_id: str, prompt_name: str) -> None:
     """Link a SessionStart event to the SystemPrompt node it injected.
 
-    The prompt node only ever holds its current content, so the
-    relationship pins the version that was actually injected: re-seed
-    the prompt tomorrow and the link still says which version shaped
-    this session.
+    A prompt node is never changed in place, so the link alone says what
+    this session was told, and the event carries no copy of the text.
     """
     from neo4j import GraphDatabase
 
@@ -488,11 +486,9 @@ def link_event_to_prompt(event_id: str, prompt_name: str, version: int | None) -
                 tx.run(
                     "MATCH (e:SessionEvent {event_id: $event_id}) "
                     "MATCH (p:SystemPrompt {name: $name}) "
-                    "MERGE (e)-[r:INJECTED_PROMPT]->(p) "
-                    "SET r.version = $version",
+                    "MERGE (e)-[:INJECTED_PROMPT]->(p)",
                     event_id=event_id,
                     name=prompt_name,
-                    version=version,
                 ).consume()
 
             session.execute_write(_link)
