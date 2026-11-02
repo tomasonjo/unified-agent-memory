@@ -76,10 +76,20 @@ exits, so that event is not the one lost.
 
 from __future__ import annotations
 
-import json
 import signal
-import sys
-from pathlib import Path
+
+if __name__ == "__main__":
+    # A headless run (-p, the Agent SDK) exits as soon as an API error ends
+    # its turn, and sends SIGTERM to the StopFailure hooks still running.
+    # The write is bounded by the driver's short timeouts, so it is allowed
+    # to finish rather than losing the one record of why the turn ended.
+    # Set before the other imports, which take a while under load; only
+    # when run as the hook, not when another hook imports this module.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+import json  # noqa: E402
+import sys  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 HOOK_DIR = Path(__file__).resolve().parent
 if str(HOOK_DIR) not in sys.path:
@@ -92,18 +102,9 @@ from common import (  # noqa: E402
     prompt_origin,
 )
 
+# Every text field, the serialized tool input included.
 MAX_FIELD_CHARS = 8000
-TRUNCATED_FIELDS = (
-    "tool_input",
-    "prompt",
-    "last_assistant_message",
-    "delta",
-    "compact_summary",
-    "custom_instructions",
-    "command_args",
-    "task_description",
-    "message",
-)
+PRIMITIVES = (str, int, float, bool)
 # A failed call's reason, which is not its result: enough to say why it
 # failed, never the output of a command that printed before failing.
 MAX_ERROR_CHARS = 1000
@@ -123,6 +124,18 @@ def _truncate(value, limit: int = MAX_FIELD_CHARS) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"...[truncated {len(text) - limit} chars]"
+
+
+def _storable(value):
+    """``value`` as Neo4j can hold it: a primitive or a list of one primitive
+    type as is, anything else as JSON text. A payload field that arrives as
+    an object would otherwise fail the whole write and lose the event."""
+    if isinstance(value, PRIMITIVES):
+        return value
+    if (isinstance(value, list) and all(isinstance(v, PRIMITIVES) for v in value)
+            and len({type(v) for v in value}) <= 1):
+        return value
+    return _text(value)
 
 
 def _displayed_lines(data: dict):
@@ -242,24 +255,17 @@ def build_event_props(data: dict) -> dict:
         "message": data.get("message"),
         "transcript_path": data.get("transcript_path"),
     }
-    props = {k: v for k, v in props.items() if v is not None}
-    for field in TRUNCATED_FIELDS:
-        if field in props:
-            props[field] = _truncate(props[field])
-    for field in ERROR_FIELDS:
-        if field in props:
-            props[field] = _truncate(props[field], MAX_ERROR_CHARS)
+    props = {k: _storable(v) for k, v in props.items() if v is not None}
+    for field, value in props.items():
+        if isinstance(value, str):
+            limit = MAX_ERROR_CHARS if field in ERROR_FIELDS else MAX_FIELD_CHARS
+            props[field] = _truncate(value, limit)
     if response is not None:
         props["tool_response_chars"] = len(_text(response))
     return props
 
 
 def main() -> int:
-    # A headless run (-p, the Agent SDK) exits as soon as an API error ends
-    # its turn, and sends SIGTERM to the StopFailure hooks still running.
-    # The write is bounded by the driver's short timeouts, so it is allowed
-    # to finish rather than losing the one record of why the turn ended.
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
     try:
         # A headless helper call spawned by hooks/llm.py is plumbing, not
         # a session; capturing it would spam the graph with one pseudo

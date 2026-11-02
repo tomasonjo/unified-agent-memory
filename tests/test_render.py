@@ -168,6 +168,23 @@ def test_split_prefers_the_turn_boundary():
     assert em.split_point([event("PostToolUse", i) for i in range(6)]) == 3
 
 
+def test_a_backlog_of_turns_splits_near_its_middle():
+    # Ten queued subagent reports, each its own turn: halve, don't peel one off.
+    events = [event("UserPromptSubmit", i, prompt=f'<agent-message from="a{i}">r')
+              for i in range(10)] + [event("Stop", 10)]
+    assert em.split_point(events) == 5
+
+
+def test_a_backlog_is_packed_into_parts_that_fit_uncut():
+    events = [event("UserPromptSubmit", i, prompt=f'<agent-message from="a{i}">' + "r" * 1000)
+              for i in range(10)] + [event("Stop", 10)]
+    part = em.split_point(events, 3500)
+    assert part == 3  # three whole reports fit; a fourth would need cutting
+    assert em.render_window(events[:part], 3500).message_cap is None
+    # A first turn too long for the budget is its own part.
+    assert em.split_point(events, 500) == 1
+
+
 def test_window_key_ignores_order():
     a = [event("UserPromptSubmit", 1), event("Stop", 2)]
     assert em.window_key(a) == em.window_key(list(reversed(a)))

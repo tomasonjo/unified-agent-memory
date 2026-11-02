@@ -364,12 +364,15 @@ transaction. The transaction then runs these steps:
   a row, the worker stops and leaves the window to the next trigger or
   sweep.
 - **Split.** Truncated output is recorded as `status: "truncated"`, and
-  the window is retried in parts. It is split first at the turn boundaries
-  inside it (a prompt that follows an earlier prompt; lifecycle events
-  before the first prompt belong to its turn), then in halves, and each
-  part is committed on its own. The truncated window itself is never
-  committed, so it and its parts can never both be. A window too large for
-  the input budget is split the same way before any call. A single-event
+  the window is retried in parts. It is split at the turn boundary nearest
+  its middle (a boundary is a prompt that follows an earlier prompt;
+  lifecycle events before the first prompt belong to its turn), then in
+  halves, and each part is committed on its own. The truncated window
+  itself is never committed, so it and its parts can never both be. A
+  window too large for the input budget is split before any call at the
+  last turn boundary before which its messages fit uncut, so a backlog of
+  turns takes as few calls as fit it; a first turn that alone does not
+  fit is its own part, cut or split again. A single-event
   window cannot be split; like repeated invalid output, it is left to the
   next trigger or sweep.
 - A completed window is never selected again, so reprocessing adds
@@ -860,6 +863,21 @@ delivered blocks are on their events.
     soon as an API error ends the turn and sends SIGTERM to the
     `StopFailure` hooks still running, which killed capture before its
     write; `log_event.py` now ignores SIGTERM.
+
+    A stress run through the real hook entry point found four more. A
+    workflow burst of 100 agents (1,126 events on one session at once)
+    lost 43 events: appends took shared locks on the dense session node
+    before the exclusive one, deadlocked, and backed off past the
+    driver's retry window. The append now writes to the session first,
+    which takes its exclusive lock, and the burst keeps every event in one
+    linear chain. A payload field that arrived as an object failed the
+    whole write; capture now stores any value Neo4j cannot hold as JSON
+    text, and caps every text field. An unreachable database cost every
+    hooked event seven to eight seconds of retries; the driver now checks
+    connectivity first and fails in milliseconds. Splitting an oversized
+    window at its first turn boundary consumed a backlog one turn per call
+    (60 queued subagent reports took 74 calls); it now packs whole turns
+    into parts that fit uncut (18 calls).
 
 ## 12. Deferred
 

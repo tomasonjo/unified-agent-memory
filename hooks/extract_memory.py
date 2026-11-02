@@ -618,21 +618,36 @@ def render_window(events: list[dict], budget: int) -> Rendered | None:
     return best
 
 
-def split_point(events: list[dict]) -> int:
-    """Where the first part of an oversized window ends: at the first turn
-    boundary inside it, else halfway.
+def split_point(events: list[dict], budget: int | None = None) -> int:
+    """Where the first part of an oversized window ends.
 
     A turn boundary inside the window is a prompt that follows an earlier
     prompt; lifecycle events before the first prompt belong to its turn.
+    Given the input budget, the part ends at the last boundary before which
+    the messages fit at their stored length: a backlog of turns is read in
+    as few calls as fit it, none of it cut. Cutting at the first boundary
+    instead consumed a backlog one turn per call (60 subagent reports
+    queued in one window took 74 calls), and halving cut every message to
+    fit (8 calls, each report about half read). When even the first turn
+    does not fit, the part is that turn, which is cut or split again.
+    Without a budget, for a truncated response, the part ends at the
+    boundary nearest the middle. With no boundary, halfway.
     """
-    prompts = [
+    boundaries = [
         index
         for index, event in enumerate(events)
         if event.get("event_name") == "UserPromptSubmit"
-    ]
-    if len(prompts) > 1:
-        return prompts[1]
-    return max(1, len(events) // 2)
+    ][1:]
+    if not boundaries:
+        return max(1, len(events) // 2)
+    if budget is None:
+        return min(boundaries, key=lambda index: abs(index - len(events) / 2))
+    best = boundaries[0]
+    for boundary in boundaries:
+        if len(render_messages(window_messages(events[:boundary]), None)) > budget:
+            break
+        best = boundary
+    return best
 
 
 def window_key(events: list[dict]) -> str:
@@ -806,6 +821,7 @@ def validate(data: dict, previous: dict | None, citable: set[str]) -> Extraction
 class Outcome:
     kind: str  # committed | lifecycle | invalid | failed | stale | split
     detail: str = ""
+    at: int | None = None  # split: where the first part ends
 
 
 class Stale(RuntimeError):
@@ -930,7 +946,7 @@ class Worker:
                 self.committed += 1
             elif outcome.kind == "split":
                 if len(window) > 1:
-                    cut = (window[0]["event_id"], split_point(window))
+                    cut = (window[0]["event_id"], outcome.at or split_point(window))
                 else:
                     return False
             elif outcome.kind == "invalid":
@@ -950,7 +966,7 @@ class Worker:
         budget = INPUT_CHARS - len(instructions) - len(frame) - 400
         rendered = render_window(window, budget)
         if rendered is None:
-            return Outcome("split", "input over budget")
+            return Outcome("split", "input over budget", split_point(window, budget))
         if not rendered.messages:
             # No prompt and no response: nothing for the model to
             # read, so no call is made. The run still marks the events

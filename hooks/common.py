@@ -331,9 +331,18 @@ def _ensure_session_schema(session) -> None:
 # event resolves differently (a changed git email, a cd into another repo).
 # The anchors are MERGEd only while missing, which also gives sessions
 # captured before they existed their anchors on the next event.
+#
+# The first write takes the session's exclusive lock, so concurrent appends
+# queue on it. Without it, a workflow's agents appending to one session
+# took shared locks on its node (dense, after a few dozen events) before
+# asking for the exclusive one, deadlocked, and backed off until the
+# driver's retry window ran out: 43 of 1,126 events in a burst from 100
+# agents were lost that way.
 APPEND_EVENT = """
 MERGE (s:Session {session_id: $session_id})
 ON CREATE SET s.created_at = datetime($timestamp)
+SET s._uam_lock = true
+REMOVE s._uam_lock
 SET s.user_id = coalesce(s.user_id, $user_id),
     s.project_id = coalesce(s.project_id, $project_id),
     s.harness = $harness,
@@ -453,12 +462,21 @@ def graph_driver(connection_timeout: float = 2.0, max_retry_time: float = 5.0):
     # would otherwise land on the hook's stderr and in the worker's log.
     logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
     uri, user, password, _ = neo4j_config()
-    return GraphDatabase.driver(
+    driver = GraphDatabase.driver(
         uri,
         auth=(user, password),
         connection_timeout=connection_timeout,
         max_transaction_retry_time=max_retry_time,
     )
+    # An unreachable graph fails here, in milliseconds when nothing listens.
+    # Left to the first write, it was retried for the whole retry window,
+    # seven to eight seconds on every hooked event.
+    try:
+        driver.verify_connectivity()
+    except Exception:
+        driver.close()
+        raise
+    return driver
 
 
 def append_session_event(session_id: str, event_name: str, props: dict) -> str:

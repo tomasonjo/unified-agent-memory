@@ -139,10 +139,14 @@ process id of the Claude Code instance that fired the hook
 (`harness_pid`, from `CLAUDE_PID`). Every hook of one process shares it,
 and a restarted session gets a new one, so a background session the
 supervisor wakes twice keeps both resumes even though their payloads
-are identical. Two storage decisions
-shape the record. Tool results are not stored: they are the bulk of a
-session and regenerable, so the record keeps only that the tool ran, what
-it was asked, and how many characters came back (`tool_response_chars`).
+are identical. Appends to one session queue on its lock, so a workflow's
+agents writing at once keep a single linear chain. A field Neo4j cannot
+hold as a property, such as one that arrives as an object, is stored as
+JSON text, and an unreachable database fails a hook in milliseconds.
+Two storage decisions shape the record. Tool results are not stored:
+they are the bulk of a session and regenerable, so the record keeps only
+that the tool ran, what it was asked, and how many characters came back
+(`tool_response_chars`).
 Inputs are stored: prompts, tool inputs, and the agent's responses (each
 bounded at 8,000 characters), a failed call's reason (1,000), and which
 prompt the injection hook injected, recorded on the `SessionStart` event
