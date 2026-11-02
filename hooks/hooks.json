@@ -1,5 +1,5 @@
 {
-  "description": "Unified Agent Memory hooks, one concern per script. log_event.py captures every lifecycle event as a :SessionEvent chain in Neo4j. inject_system_prompt.py injects the standing instructions at session start. extract_memory.py consolidates captured events into episodes: on Stop and SessionEnd it starts a detached worker and returns, and on SessionStart (startup) it sweeps up windows an interrupted worker left behind. recall.py injects a recap of recent project activity at session start and records what the memory tools returned. All are PEP 723 uv scripts, run from ${CLAUDE_PLUGIN_ROOT}, which the harness sets for an installed plugin and for a --plugin-dir checkout.",
+  "description": "Unified Agent Memory hooks, one concern per script. log_event.py captures every lifecycle event as a :SessionEvent chain in Neo4j, including those that fire inside subagents and workflow agents. It is not wired to WorktreeCreate or WorktreeRemove: a hook there replaces the harness's own worktree handling. inject_system_prompt.py injects the standing instructions at session start. extract_memory.py consolidates captured events into episodes: on Stop and SessionEnd it starts a detached worker and returns, and on SessionStart (startup) it sweeps up windows an interrupted worker left behind. recall.py injects a recap of recent project activity at session start and records what the memory tools returned. All are PEP 723 uv scripts, run from ${CLAUDE_PLUGIN_ROOT}, which the harness sets for an installed plugin and for a --plugin-dir checkout.",
   "hooks": {
     "SessionStart": [
       {
@@ -38,7 +38,27 @@
         ]
       }
     ],
+    "InstructionsLoaded": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --script \"${CLAUDE_PLUGIN_ROOT}/hooks/log_event.py\""
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --script \"${CLAUDE_PLUGIN_ROOT}/hooks/log_event.py\""
+          }
+        ]
+      }
+    ],
+    "UserPromptExpansion": [
       {
         "hooks": [
           {
@@ -88,6 +108,16 @@
         ]
       }
     ],
+    "PermissionDenied": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --script \"${CLAUDE_PLUGIN_ROOT}/hooks/log_event.py\""
+          }
+        ]
+      }
+    ],
     "Notification": [
       {
         "hooks": [
@@ -126,6 +156,16 @@
         ]
       }
     ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --script \"${CLAUDE_PLUGIN_ROOT}/hooks/log_event.py\""
+          }
+        ]
+      }
+    ],
     "SubagentStart": [
       {
         "hooks": [
@@ -146,7 +186,47 @@
         ]
       }
     ],
+    "TaskCreated": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --script \"${CLAUDE_PLUGIN_ROOT}/hooks/log_event.py\""
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --script \"${CLAUDE_PLUGIN_ROOT}/hooks/log_event.py\""
+          }
+        ]
+      }
+    ],
     "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --script \"${CLAUDE_PLUGIN_ROOT}/hooks/log_event.py\""
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --script \"${CLAUDE_PLUGIN_ROOT}/hooks/log_event.py\""
+          }
+        ]
+      }
+    ],
+    "PostModelSwitch": [
       {
         "hooks": [
           {

@@ -1,11 +1,12 @@
 """Shared fixtures: a scratch Neo4j database, captured events, a scripted model.
 
 The graph tests need a database they may wipe. Name it in
-``UAM_TEST_DATABASE`` (the name must contain "test"); connection settings
-come from the plugin's env file or exported NEO4J_* variables, as for the
-hooks. Without it, only the tests that need no graph run::
+``UAM_TEST_DATABASE``; every graph test empties it first, so never name the
+database your hooks write to. Connection settings come from the plugin's
+env file or exported NEO4J_* variables, as for the hooks. Without it, only
+the tests that need no graph run::
 
-    UAM_TEST_DATABASE=uamtest uv run --with pytest --with neo4j pytest tests
+    UAM_TEST_DATABASE=uam uv run --with pytest --with neo4j pytest tests
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ def pytest_configure(config):
 
 
 def pytest_collection_modifyitems(config, items):
-    if TEST_DATABASE and "test" in TEST_DATABASE:
+    if TEST_DATABASE:
         return
     skip = pytest.mark.skip(reason="set UAM_TEST_DATABASE to a scratch database")
     for item in items:

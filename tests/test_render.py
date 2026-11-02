@@ -91,6 +91,64 @@ def test_tools_subagents_and_bookkeeping_never_reach_the_model():
     )
 
 
+def test_prompts_the_harness_submits_are_labeled_by_sender():
+    report = ('<agent-message from="ab8bdabc82e08ba05">\n[Subagent hand-back] '
+              "Renewal drop traced to the March 3 pipeline change.")
+    events = [
+        event("UserPromptSubmit", 0, prompt="Why did renewals drop?", prompt_origin="user"),
+        event("Stop", 1, last_assistant_message="Started an Explore agent."),
+        event("UserPromptSubmit", 2, prompt=report, prompt_origin="agent-message"),
+        # Captured before capture recorded the origin.
+        event("UserPromptSubmit", 3, prompt="<task-notification>\n<status>completed</status>"),
+        event("UserPromptSubmit", 4, prompt='<cross-session-message from="local_1">done'),
+        event("Stop", 5, last_assistant_message="The drop is explained."),
+    ]
+    rendered = em.render_window(events, 10**6)
+    assert rendered.text == (
+        "[--:--:--] User prompt:\nWhy did renewals drop?\n"
+        "[--:--:--] Agent final response:\nStarted an Explore agent.\n"
+        "[--:--:--] Subagent report:\n" + report + "\n"
+        "[--:--:--] Background task notification:\n"
+        "<task-notification>\n<status>completed</status>\n"
+        "[--:--:--] Message from another session:\n"
+        '<cross-session-message from="local_1">done\n'
+        "[--:--:--] Agent final response:\nThe drop is explained."
+    )
+
+
+def test_a_paused_turn_lists_its_background_work():
+    events = [
+        event("UserPromptSubmit", 0, prompt="Audit the renewal queries"),
+        event("Stop", 1, last_assistant_message="Two agents are on it.",
+              background_tasks=["subagent (running): Explore · Map the renewal queries",
+                                "workflow (running): deep-research"],
+              session_crons=["*/5 * * * * (recurring): check the audit"]),
+        event("SessionEnd", 2),
+    ]
+    rendered = em.render_window(events, 10**6)
+    assert rendered.text == (
+        "[--:--:--] User prompt:\nAudit the renewal queries\n"
+        "[--:--:--] Agent final response:\nTwo agents are on it.\n"
+        "[--:--:--] Background work at turn end:\n"
+        "Still running:\n"
+        "- subagent (running): Explore · Map the renewal queries\n"
+        "- workflow (running): deep-research\n"
+        "Scheduled:\n"
+        "- */5 * * * * (recurring): check the audit"
+    )
+
+
+def test_a_turn_an_api_error_ended_says_so():
+    events = [
+        event("UserPromptSubmit", 0, prompt="Rerun the reports"),
+        event("StopFailure", 1, error="rate_limit", error_details="429 Too Many Requests",
+              last_assistant_message="API Error: Rate limit reached"),
+    ]
+    rendered = em.render_window(events, 10**6)
+    assert rendered.text.endswith(
+        "[--:--:--] Turn ended by an API error:\nrate_limit: 429 Too Many Requests")
+
+
 def test_a_window_without_messages_renders_nothing():
     events = [
         event("PostToolUse", 0, tool_name="Read", tool_use_id="t1",

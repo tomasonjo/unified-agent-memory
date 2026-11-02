@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -147,6 +148,51 @@ def harness() -> str:
     into another harness and set UAM_HARNESS in that hook configuration.
     """
     return os.getenv("UAM_HARNESS", "claude-code")
+
+
+def job_id() -> str | None:
+    """The background-session job this hook runs in, or None.
+
+    Claude Code sets ``CLAUDE_JOB_DIR`` to ``~/.claude/jobs/<id>`` in every
+    background session (``claude --bg``, ``/background``, a dispatch from
+    agent view), and the hook inherits it. A session started from a
+    background session's own shell would inherit it too.
+    """
+    return Path((os.getenv("CLAUDE_JOB_DIR") or "").strip()).name or None
+
+
+def harness_pid() -> str | None:
+    """Process id of the harness that fired the hook (``CLAUDE_PID``).
+
+    Every hook of one Claude Code process gets the same value, and a
+    restarted process gets a new one: the supervisor waking an idle
+    background session, ``claude respawn``, or ``--resume``.
+    """
+    return (os.getenv("CLAUDE_PID") or "").strip() or None
+
+
+# Wrappers the harness puts around a prompt it submits on someone else's
+# behalf. UserPromptSubmit fires for these too, with nothing in the payload
+# to tell them from typed text, so the opening tag is the only mark.
+HARNESS_PROMPT_TAGS = (
+    "task-notification",  # a background task finished
+    "agent-message",  # a background subagent's report
+    "teammate-message",  # an agent-team teammate
+    "cross-session-message",  # another session
+    "channel",  # an MCP channel, such as a chat bridge
+)
+_PROMPT_TAG = re.compile(r"<([a-z][a-z-]*)[\s>]")
+
+
+def prompt_origin(prompt) -> str:
+    """Who a submitted prompt came from: the harness wrapper's tag that
+    opens it, else ``user``.
+
+    A scheduled prompt (``/loop``, a cron) arrives bare and still reads as
+    ``user``; nothing in the prompt or payload marks it.
+    """
+    match = _PROMPT_TAG.match(prompt.lstrip()) if isinstance(prompt, str) else None
+    return match.group(1) if match and match.group(1) in HARNESS_PROMPT_TAGS else "user"
 
 
 def _transcript_model(transcript_path) -> str:
@@ -291,7 +337,8 @@ ON CREATE SET s.created_at = datetime($timestamp)
 SET s.user_id = coalesce(s.user_id, $user_id),
     s.project_id = coalesce(s.project_id, $project_id),
     s.harness = $harness,
-    s.model = coalesce($model, s.model)
+    s.model = coalesce($model, s.model),
+    s.job_id = coalesce($job_id, s.job_id)
 WITH s
 FOREACH (_ IN CASE WHEN NOT EXISTS { (:User)-[:HAS_SESSION]->(s) }
                    THEN [1] ELSE [] END |
@@ -333,6 +380,7 @@ def _append_event(tx, event_props: dict, project: str, model: str | None) -> Non
         project_id=project,
         harness=harness(),
         model=model,
+        job_id=job_id(),
         timestamp=event_props.get("timestamp"),
         event_id=event_props.get("event_id"),
         event_props=event_props,
@@ -343,9 +391,16 @@ def event_record(session_id: str, event_name: str, props: dict) -> tuple[str, di
     """The event id and the properties ``append_event`` stores for ``props``.
 
     The id is a hash of the event's own content (timestamp excluded), so
-    every hook that appends the same payload computes the same id.
+    every hook that appends the same payload computes the same id. The
+    content includes the harness process that fired it (``harness_pid``),
+    shared by every hook of that process: a restarted session repeats its
+    resume ``SessionStart``, and the ``SessionEnd`` before it, word for
+    word, and each restart is still its own event.
     """
     session_id = session_id or "unknown"
+    pid = props.get("harness_pid") or harness_pid()
+    if pid:
+        props = {**props, "harness_pid": pid}
     payload_sig = sha1(
         json.dumps(props, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()[:16]

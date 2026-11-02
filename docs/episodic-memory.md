@@ -62,8 +62,8 @@ extraction should "retain the originating memory references".
 |---|---|
 | `User` | `user_id` |
 | `Project` | `id`, `name` |
-| `Session` | `project_id`, `display_id` (`s41`), `extraction_lease_owner`, `extraction_lease_until`; `user_id` becomes write-once |
-| `SessionEvent` | `prompt_id` and, on a failed tool call, `tool_error` ([3](#3-capture-changes)); on delivery events: `recall_block`, `recall_channel` |
+| `Session` | `project_id`, `display_id` (`s41`), `extraction_lease_owner`, `extraction_lease_until`, and `job_id` for a background session ([conflict 18](#11-conflicts-to-resolve)); `user_id` becomes write-once |
+| `SessionEvent` | `prompt_id` and, on a failed tool call, `tool_error` ([3](#3-capture-changes)); `prompt_origin` on a submitted prompt, `background_tasks` and `session_crons` on a `Stop`, and `harness_pid` on every event ([conflict 18](#11-conflicts-to-resolve)); on delivery events: `recall_block`, `recall_channel` |
 | `Observation` | `id`, `display_id` (`o112`), `project_id`, `session_id`, `type`, `title`, `narrative`, `source_start`, `source_end`, `created_at`, `embedding` |
 | `SessionSummary` | `id`, `session_id`, `project_id`, `version`, `headline`, `request`, `progress`, `outcome`, `source_start`, `source_end`, `created_at`, `updated_at`, `embedding` |
 | `ExtractionRun` | `id`, `status`, `session_id`, `window_key`, `llm_model`, `event_count`, `created_at`, `input_summary_version`, `input_summary_json`, `output_summary_version`, `output_summary_json`, `input_excerpts_json`, `input_chars`, `input_trim_json`, `error` |
@@ -208,20 +208,24 @@ the worker processes ready windows until none remain:
   the model only through the summary, as the chapter has it
   ([conflict 17](#11-conflicts-to-resolve)).
 
-**Decision:** the model reads only the window's messages: the user's
-prompts and the agent's intermediate and final responses. A turn's final
+**Decision:** the model reads only the window's messages: the prompts the
+session received and the agent's intermediate and final responses. A turn's final
 response, which its `Stop` carries, reports what the turn did and how it
 ended. The intermediate responses, written between tool calls, say what
 the agent was doing and noticed on the way, which matters most when a
 turn is interrupted before it ends. Its tool calls show
 only what was attempted, since capture keeps no tool output, and in long
 turns they made up most of the input: two real captured turns of 291 and
-342 events held 141 and 168 tool calls. So tool calls, subagent reports
-(which reach the session as the Agent tool's result), lifecycle markers,
+342 events held 141 and 168 tool calls. So tool calls, foreground subagent
+reports (which reach the session as the Agent tool's result), lifecycle markers,
 the injected system prompt's record, full recall blocks, and
 bookkeeping such as `transcript_path` stay in the captured record, unread.
 That also keeps the harness's internal agents out of the input
-([conflict 11](#11-conflicts-to-resolve)). Capture is unchanged: the raw
+([conflict 11](#11-conflicts-to-resolve)). A background subagent's report
+arrives as a prompt the harness submits, so it is read, labeled by its
+sender; a `Stop` that left work running is followed by that list; a turn
+an API error ended says so ([conflict 18](#11-conflicts-to-resolve)).
+Capture is unchanged: the raw
 record keeps every event for direct queries and for
 `expand_episodic(id, events=true)`.
 
@@ -615,13 +619,13 @@ off as the completion.
 
 | File | Change | Status |
 |---|---|---|
-| `hooks/common.py` | Project and user resolution with overrides; write-once owner and project anchors in `_append_event`; new constraints, one-query schema check, and env keys | Done |
-| `hooks/log_event.py` | Keeps `prompt_id`, and a failed call's reason as `tool_error` | Done |
+| `hooks/common.py` | Project and user resolution with overrides; write-once owner and project anchors in `_append_event`; new constraints, one-query schema check, and env keys; `prompt_origin`, the background `job_id`, and `harness_pid` in the event id | Done |
+| `hooks/log_event.py` | Keeps `prompt_id`, and a failed call's reason as `tool_error`; `prompt_origin`, a `Stop`'s `background_tasks` and `session_crons`, and the newer lifecycle events ([conflict 18](#11-conflicts-to-resolve)) | Done |
 | `hooks/episodes.py` | New: schema and indexes, retrieval (recent records, hybrid search with normalized score fusion, expand queries), row rendering, display-id resolution, recap selection, delivery recording | Done |
 | `hooks/extract_memory.py` | New: the `Stop` and `SessionEnd` trigger, the `SessionStart` sweep, and the worker | Done |
 | `hooks/recall.py` | New: the `SessionStart` recap and `PostToolUse` records for the memory tools | Done |
 | `hooks/llm.py` | Adds `embed_texts()`, `completion_model()`, `max_tokens`, and the headless-call flags | Done |
-| `hooks/hooks.json` | Wires the new entry points | Done |
+| `hooks/hooks.json` | Wires the new entry points, and capture for the newer lifecycle events | Done |
 | `mcp/server.py` | New: the `memory` server, with `search_episodic`, `expand_episodic`, and the proxied read-only graph tools | Done |
 | `mcp/run_neo4j_mcp.py` | Removed; `mcp/server.py` took over its settings handling | Done |
 | `mcp.json` | `memory` replaces `neo4j` | Done |
@@ -637,7 +641,7 @@ all but checks 5 and 9, which depend on what the model writes, with a
 scripted model in place of the real one:
 
 ```
-UAM_TEST_DATABASE=uamtest uv run --with pytest --with neo4j pytest tests
+UAM_TEST_DATABASE=uam uv run --with pytest --with neo4j pytest tests
 ```
 
 1. A fresh session by the second user gets a recap that names the first
@@ -811,6 +815,51 @@ delivered blocks are on their events.
     `recall` skill is gone too, since chapter 3 ships no skill and
     chapter 2 says the orchestrator's recall step reaches the new tools
     unchanged.
+18. **Background subagents and workflows. Fixed in capture and
+    consolidation.** Subagents now start in the background by default, and
+    a workflow runs dozens to hundreds of them (checked against the hooks
+    reference and Claude Code 2.1.268). A background subagent's report
+    does not reach the session as the `Agent` tool's result; the harness
+    submits it as a new prompt wrapped in `<agent-message from="…">`, and
+    background tasks report in `<task-notification>`, teammates, other
+    sessions, and channels in their own tags. `UserPromptSubmit` fires for
+    each, with nothing in the payload to tell it from typed text, so the
+    model read those reports as the user's own requests. Capture now
+    records each prompt's `prompt_origin` and consolidation labels the
+    message by sender; events captured before fall back to reading the
+    tag. A scheduled prompt (`/loop`, a cron) arrives bare and stays
+    `user`. A `Stop` that leaves agents running is a pause, not an end;
+    its `background_tasks` and `session_crons` are now captured (on the
+    main agent's `Stop` only, since every `SubagentStop` repeats the
+    parent's list) and follow the turn's final response in the window,
+    and the instructions say their results are pending. The window still
+    closes at that `Stop`: the agents' later events and their report
+    land in the next window. Workflow agents fire the same hooks under
+    the parent's session id, so their tool calls share the parent's
+    chain; 150 captures fired at one session at once all landed in one
+    linear chain, in 12.8 seconds, with lock retries along the way. The
+    newer events (`StopFailure`, `PostCompact`, `PermissionDenied`,
+    `UserPromptExpansion`, `PostModelSwitch`, `TaskCreated`,
+    `TaskCompleted`, `InstructionsLoaded`) are captured; of them only
+    `StopFailure` reaches the model.
+
+    Checked against live background sessions on 2.1.268. A background
+    session's hooks see `CLAUDE_JOB_DIR`, so its session now records its
+    `job_id`. The supervisor's restart of an idle session, and
+    `claude respawn`, fire `SessionEnd` (reason `other`) and then
+    `SessionStart` with source `resume` under the same session id; a
+    process that dies is restarted with a `SessionStart` alone. Every
+    resume sends the same payload, so the second restart collapsed into
+    the first resume's node and its recap record overwrote the first.
+    The event id now includes the harness process (`CLAUDE_PID`), the
+    same for every hook of one process and new for each restart. A fork
+    (`/fork`, `--fork-session`) arrives as `SessionStart` with source
+    `fork` and a new id, and no field in the payload or the transcript
+    names its parent: forks stay unlinked, and their first window starts
+    without a previous summary. In a headless run the harness exits as
+    soon as an API error ends the turn and sends SIGTERM to the
+    `StopFailure` hooks still running, which killed capture before its
+    write; `log_event.py` now ignores SIGTERM.
 
 ## 12. Deferred
 

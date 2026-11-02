@@ -225,6 +225,73 @@ def test_what_the_assistant_said_during_a_turn_reaches_the_model(graph, model):
     ) == 2  # both lines processed, one per window
 
 
+def test_a_background_subagents_report_reaches_the_model_as_its_own(graph, model):
+    capture("s-maria", "SessionStart", source="startup")
+    asked = uuid.uuid4().hex
+    capture("s-maria", "UserPromptSubmit", prompt_id=asked,
+            prompt="Investigate the apparent drop in customer renewals.")
+    capture("s-maria", "SubagentStart", agent_id="a-explore", agent_type="Explore",
+            prompt_id=asked)
+    capture("s-maria", "Stop", last_assistant_message="An Explore agent is tracing it.",
+            stop_hook_active=False, prompt_id=asked, background_tasks=[
+                {"id": "a-explore", "type": "subagent", "status": "running",
+                 "agent_type": "Explore", "description": "Trace the renewal drop"}])
+    # The subagent works on after the turn ended, then reports back.
+    capture("s-maria", "PreToolUse", tool_name="Bash", tool_use_id="toolu_1",
+            tool_input={"command": "psql -f renewals.sql"}, agent_id="a-explore",
+            agent_type="Explore", prompt_id=asked)
+    capture("s-maria", "SubagentStop", agent_id="a-explore", agent_type="Explore",
+            last_assistant_message="Traced it to March 3.", prompt_id=asked,
+            agent_transcript_path="/p/s-maria/subagents/agent-a-explore.jsonl")
+    report = ('<agent-message from="a-explore">\n[Subagent hand-back] '
+              "Renewal drop traced to the March 3 pipeline change.")
+    delivered = uuid.uuid4().hex
+    capture("s-maria", "UserPromptSubmit", prompt=report, prompt_id=delivered)
+    capture("s-maria", "Stop", last_assistant_message=FINAL_RESPONSE,
+            stop_hook_active=False, prompt_id=delivered, background_tasks=[])
+
+    paused = {"observations": [], "summary": summary(
+        "Renewal drop under investigation", "An Explore agent is tracing the drop.")}
+    scripted = model(paused, FIRST_PASS)
+    em.consolidate(["s-maria"])
+
+    first, second = (call[1]["content"] for call in scripted.calls)
+    assert "Agent final response:\nAn Explore agent is tracing it.\n" in first
+    assert ("Background work at turn end:\nStill running:\n"
+            "- subagent (running): Explore · Trace the renewal drop") in first
+    assert first.index("tracing it.") < first.index("Background work at turn end")
+    assert "Subagent report:\n" + report in second
+    assert "User prompt:\n<agent-message" not in second
+    assert "Background work at turn end" not in second  # nothing left in flight
+    assert "psql -f renewals.sql" not in first + second
+    assert graph.value(
+        "MATCH (e:SessionEvent {event_name: 'UserPromptSubmit', prompt_id: $p}) "
+        "RETURN e.prompt_origin", p=delivered) == "agent-message"
+
+
+def test_a_background_session_keeps_its_job_and_each_restart(graph, monkeypatch):
+    monkeypatch.setenv("CLAUDE_JOB_DIR", "/Users/maria/.claude/jobs/bb776ea2")
+    monkeypatch.setenv("CLAUDE_PID", "100")
+    capture("s-bg", "SessionStart", source="startup")
+    capture("s-bg", "SessionEnd", reason="other")
+    for pid in ("200", "300"):  # two wake-ups by the supervisor
+        monkeypatch.setenv("CLAUDE_PID", pid)
+        capture("s-bg", "SessionStart", source="resume")
+        capture("s-bg", "SessionStart", source="resume")  # a parallel hook
+    assert graph.value("MATCH (s:Session {session_id: 's-bg'}) RETURN s.job_id") == "bb776ea2"
+    assert graph.rows(
+        "MATCH (:Session {session_id: 's-bg'})-[:FIRST_EVENT]->(f) "
+        "MATCH p = (f)-[:NEXT*0..]->(e) WITH e ORDER BY length(p) "
+        "RETURN e.source AS source, e.harness_pid AS pid"
+    ) == [{"source": "startup", "pid": "100"}, {"source": None, "pid": "100"},
+          {"source": "resume", "pid": "200"}, {"source": "resume", "pid": "300"}]
+
+    # A session never backgrounded has no job.
+    monkeypatch.delenv("CLAUDE_JOB_DIR")
+    capture("s-maria", "SessionStart", source="startup")
+    assert graph.value("MATCH (s:Session {session_id: 's-maria'}) RETURN s.job_id") is None
+
+
 def test_a_failed_call_leaves_the_window_eligible(graph, model):
     maria_first_turn()
     model(RuntimeError("provider down"))

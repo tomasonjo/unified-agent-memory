@@ -4,7 +4,8 @@ A starter Claude Code plugin that gives an agent a persistent memory
 system, one piece per chapter of the book it accompanies:
 
 1. **Hook event capture.** Every lifecycle event (session start, prompts,
-   tool calls, stop, compaction, session end) is appended to Neo4j as a
+   tool calls, subagents and workflow agents, stop, compaction, session
+   end) is appended to Neo4j as a
    per-session chain of `(:SessionEvent)` nodes, the same episodic shape
    the meta-knowledge-graph sister project uses. This is the raw material
    every later memory stage is built from.
@@ -133,7 +134,12 @@ sister project uses:
 ```
 
 Each event's id is a hash of its content, so the same payload delivered to
-two parallel hook configs collapses to one node. Two storage decisions
+two parallel hook configs collapses to one node. The content includes the
+process id of the Claude Code instance that fired the hook
+(`harness_pid`, from `CLAUDE_PID`). Every hook of one process shares it,
+and a restarted session gets a new one, so a background session the
+supervisor wakes twice keeps both resumes even though their payloads
+are identical. Two storage decisions
 shape the record. Tool results are not stored: they are the bulk of a
 session and regenerable, so the record keeps only that the tool ran, what
 it was asked, and how many characters came back (`tool_response_chars`).
@@ -145,6 +151,42 @@ two ways: each `Stop` carries the turn's final response, and
 `MessageDisplay` carries every response as it streams to the screen,
 including the intermediate responses written between tool calls, one
 event per batch of lines (`message_id`, `index`, `final`, `delta`).
+
+Subagents run in the background by default, and a workflow runs dozens of
+them. Their hooks fire under the parent's session id, so their tool calls
+land on the parent's chain, told apart by `agent_id` and `agent_type`
+(`workflow-subagent` for a workflow's agents). A background subagent's
+report does not come back as the `Agent` tool's result: the harness
+submits it to the session as a new prompt, as it does a teammate's,
+another session's, or a channel's message. Nothing in the payload marks
+these, so each prompt records its `prompt_origin`: `user`, or the wrapper
+tag that opens it (`agent-message`, `task-notification`,
+`teammate-message`, `cross-session-message`, `channel`). A scheduled
+prompt (`/loop`, a cron) arrives bare and still reads as `user`. The main
+agent's `Stop` records what was still in flight when the turn ended,
+`background_tasks` and `session_crons`, one line each (at most 20), so a
+session waiting on its agents is not mistaken for a finished one.
+
+The newer lifecycle events are captured too: `PostCompact` keeps the
+harness's own `compact_summary`, `StopFailure` the API `error` that ended
+a turn, `PermissionDenied` the auto-mode `reason`, `UserPromptExpansion`
+the command a prompt expanded (`command_name`, `command_args`),
+`PostModelSwitch` the `from_model` and `to_model`, `TaskCreated` and
+`TaskCompleted` the task, and `InstructionsLoaded` which `CLAUDE.md` or
+rules file entered context. Every event keeps its `permission_mode` and
+`effort_level`. `WorktreeCreate` and `WorktreeRemove` are left alone: a
+hook on either replaces the harness's own worktree handling.
+
+A background session (`claude --bg`, `/background`, or a dispatch from
+agent view) is stamped with its `job_id`, the short id `claude agents`
+shows, read from the `CLAUDE_JOB_DIR` the harness sets. A session forked
+with `/fork` or `--fork-session` starts with `SessionStart` source `fork`
+and a new session id, and nothing in the payload names the session it
+was copied from, so the graph cannot link the two. A headless run (`-p`,
+the Agent SDK) exits as soon as an API error ends its turn and sends
+SIGTERM to the hooks still running; `log_event.py` ignores it, so the
+`StopFailure` record is still written.
+
 Injection is not a lifecycle event, so nothing invented enters the chain:
 the injection hook appends the same `SessionStart` event the capture hook
 does, the shared content hash collapses the two writes into one node, and
@@ -210,9 +252,11 @@ provenance:
 ```
 
 The model reads only the window's messages, within 30,000 characters:
-the user's prompts, the agent's intermediate responses (reassembled from
-their `MessageDisplay` flushes), and each turn's final response, read
-once; tool calls stay in the captured record, unread. A per-session lease keeps two workers apart, a failed or
+the prompts the session received, each labeled by sender (a subagent
+report is not the user's request), the agent's intermediate responses
+(reassembled from their `MessageDisplay` flushes), each turn's final
+response, read once, the background work a turn left running, and a turn
+an API error ended; tool calls stay in the captured record, unread. A per-session lease keeps two workers apart, a failed or
 invalid call leaves the window for the next try, and a completed window is
 never processed twice. On `SessionStart` (startup) the
 same script sweeps up windows an interrupted worker left behind. Each
@@ -243,7 +287,9 @@ records what they returned. Every delivery is kept on the event that
 carried it, block and all, with `(memory)-[:INJECTED_AT]->(event)` for
 each memory it names; the session is one `HAS_EVENT` hop away. Every
 `SessionStart`, including a resume, clear, or compact, gets its own recap
-and its own record. Each entry point has
+and its own record, and so does each restart of a background session:
+the supervisor stops an idle one after about an hour and resumes it on
+your next reply. Each entry point has
 a time budget of a few seconds; a slow or unreachable store costs the
 block, never the session.
 
@@ -259,7 +305,8 @@ the orchestrator's job is routing memory: recall what is relevant before
 the work, hand each phase only the slice it needs, verify evidence between
 phases, and record lessons when the last phase lands. Capture needs no
 help from the skill: `SubagentStart` and `SubagentStop` are among the
-events `log_event.py` already writes down.
+events `log_event.py` already writes down, and a background subagent's
+report reaches consolidation labeled as the subagent's.
 
 The skill format and the pairing of memory hooks with skills follow
 [claude-mem](https://github.com/thedotmack/claude-mem), whose `do` and
@@ -487,11 +534,11 @@ Resolution rules:
 database, which the tests wipe, with a scripted model in place of the real
 one: the chapter's handoff between two users, leases, stale workers,
 window splits, the input budget, and the recall delivery records. Name the
-database in `UAM_TEST_DATABASE` (the name must contain "test"); the
+database in `UAM_TEST_DATABASE`, never the one your hooks write to; the
 connection comes from the env file as for the hooks:
 
 ```
-UAM_TEST_DATABASE=uamtest uv run --with pytest --with neo4j pytest tests
+UAM_TEST_DATABASE=uam uv run --with pytest --with neo4j pytest tests
 ```
 
 ## Upgrading an existing graph
