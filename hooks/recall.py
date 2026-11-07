@@ -46,6 +46,7 @@ from common import (  # noqa: E402
     in_llm_subprocess,
     load_env,
     neo4j_config,
+    read_payload,
 )
 from log_event import build_event_props  # noqa: E402
 
@@ -170,8 +171,7 @@ def main() -> int:
         if in_llm_subprocess():
             return 0
         load_env()
-        raw = sys.stdin.read()
-        payload = json.loads(raw) if raw.strip() else {}
+        payload = read_payload()
         event = str(payload.get("hook_event_name") or "")
         handler = HANDLERS.get(event)
         session_id = str(payload.get("session_id") or "")

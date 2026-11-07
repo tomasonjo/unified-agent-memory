@@ -23,7 +23,8 @@ def start(session_id: str = SESSION) -> dict:
 
 
 def run_hook(main, payload: dict, monkeypatch, capsys):
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    raw = io.BytesIO(json.dumps(payload).encode("utf-8"))
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(raw, encoding="utf-8"))
     assert main() == 0
     return capsys.readouterr()
 

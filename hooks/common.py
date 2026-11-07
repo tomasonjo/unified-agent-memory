@@ -36,6 +36,20 @@ def in_llm_subprocess() -> bool:
     return bool(os.environ.get(LLM_SUBPROCESS_SENTINEL))
 
 
+def read_payload() -> dict:
+    """The hook payload on stdin, parsed; ``{}`` when stdin is empty.
+
+    Claude Code writes UTF-8, so the bytes are decoded as UTF-8 here.
+    ``sys.stdin`` would decode with the locale's encoding, which on
+    Windows before Python 3.15 is the ANSI code page: cp1252 raises on
+    some UTF-8 bytes (a closing curly quote, ``č``) and garbles the rest.
+    """
+    if sys.stdin is None:
+        return {}
+    raw = sys.stdin.buffer.read().decode("utf-8", errors="replace")
+    return json.loads(raw) if raw.strip() else {}
+
+
 def _claude_account_email() -> str:
     """Email of the account logged in to Claude Code, read at runtime.
 
@@ -52,7 +66,7 @@ def _claude_account_email() -> str:
     candidates.append(Path.home() / ".claude.json")
     for candidate in candidates:
         try:
-            data = json.loads(candidate.read_text())
+            data = json.loads(candidate.read_text(encoding="utf-8"))
         except Exception:
             continue
         email = (data.get("oauthAccount") or {}).get("emailAddress") or ""
@@ -66,7 +80,8 @@ def _git_email() -> str:
         out = subprocess.run(
             ["git", "config", "--get", "user.email"],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=2,
         )
         return out.stdout.strip().lower()
@@ -108,7 +123,8 @@ def _git_main_root(directory: Path) -> Path | None:
                 "--git-common-dir",
             ],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=2,
         )
     except Exception:
@@ -644,7 +660,10 @@ def env_file_path() -> Path:
 def _parse_env_file(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     try:
-        lines = path.read_text().splitlines()
+        # UTF-8 on every platform, so a value means the same everywhere;
+        # "-sig" drops the byte-order mark some Windows editors write, which
+        # would otherwise become part of the first key.
+        lines = path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
     except OSError:
         return values
     for raw in lines:
@@ -669,7 +688,7 @@ def _seed_env_file(path: Path) -> None:
         if directory == data_dir():
             os.chmod(directory, 0o700)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(ENV_TEMPLATE)
     except OSError:
         pass

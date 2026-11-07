@@ -84,6 +84,7 @@ from common import (  # noqa: E402
     plugin_root,
     project_id,
     prompt_origin,
+    read_payload,
     user_id,
 )
 
@@ -1251,11 +1252,6 @@ def spawn(mode: str, payload: dict) -> None:
     proc.stdin.close()
 
 
-def _read_payload() -> dict:
-    raw = sys.stdin.read()
-    return json.loads(raw) if raw.strip() else {}
-
-
 def run_worker(payload: dict) -> None:
     """Append the closing event, then consolidate the session's ready windows."""
     from log_event import build_event_props
@@ -1286,7 +1282,7 @@ def main() -> int:
         if args.session:
             consolidate([args.session])
             return 0
-        payload = _read_payload()
+        payload = read_payload()
         if args.worker:
             run_worker(payload)
         elif args.sweep:

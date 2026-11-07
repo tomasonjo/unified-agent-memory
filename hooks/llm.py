@@ -272,7 +272,8 @@ def _run_quiet(cmd: list[str]) -> str | None:
         proc = subprocess.run(
             cmd,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=OAUTH_READ_TIMEOUT_SECONDS,
             check=False,
         )
@@ -407,11 +408,15 @@ def _complete_claude_cli_once(messages: list[dict[str, str]]) -> str:
     )
 
     def run(args: list[str]) -> subprocess.CompletedProcess:
+        # The CLI reads and writes UTF-8. Text mode without an encoding
+        # would use the ANSI code page on Windows, which cannot encode
+        # every character a transcript holds.
         return subprocess.run(
             args,
             input=user,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             env=_claude_cli_env(),
             cwd=tempfile.gettempdir(),
             timeout=timeout,

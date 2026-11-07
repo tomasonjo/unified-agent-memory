@@ -100,6 +100,7 @@ from common import (  # noqa: E402
     in_llm_subprocess,
     load_env,
     prompt_origin,
+    read_payload,
 )
 
 # Every text field, the serialized tool input included.
@@ -273,8 +274,7 @@ def main() -> int:
         if in_llm_subprocess():
             return 0
         load_env()
-        raw = sys.stdin.read()
-        data = json.loads(raw) if raw.strip() else {}
+        data = read_payload()
         session_id = str(data.get("session_id") or "unknown")
         event_name = str(data.get("hook_event_name") or "unknown")
         append_session_event(session_id, event_name, build_event_props(data))

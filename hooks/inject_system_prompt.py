@@ -45,6 +45,7 @@ from common import (  # noqa: E402
     link_event_to_prompt,
     load_env,
     neo4j_config,
+    read_payload,
     set_event_props,
 )
 from log_event import build_event_props  # noqa: E402
@@ -113,7 +114,7 @@ def fetch_prompt_from_neo4j(name: str) -> str | None:
 def read_bundled_prompt() -> str | None:
     path = HOOK_DIR / "default_system_prompt.md"
     try:
-        content = path.read_text()
+        content = path.read_text(encoding="utf-8")
     except OSError:
         return None
     return content if content.strip() else None
@@ -139,8 +140,7 @@ def main() -> int:
         load_env()
 
         try:
-            raw = sys.stdin.read()
-            payload = json.loads(raw) if raw.strip() else {}
+            payload = read_payload()
         except Exception:
             payload = {}
 
