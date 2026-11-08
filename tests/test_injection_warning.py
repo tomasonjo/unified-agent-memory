@@ -50,12 +50,14 @@ def test_an_unreachable_graph_warns_once_and_fast(unreachable, monkeypatch, caps
     output, err = run_main(monkeypatch, capsys)
     assert time.monotonic() - started < 10
 
-    assert output["hookSpecificOutput"]["additionalContext"] == isp.read_bundled_prompt()
     warning = output["systemMessage"]
     assert "could not use Neo4j at bolt://127.0.0.1:1" in warning
     assert "the server could not be reached" in warning
     assert "bundled prompt" in warning
     assert "Neo4j lookup failed" in err
+    assert output["hookSpecificOutput"]["additionalContext"] == (
+        f"{isp.read_bundled_prompt().rstrip()}\n\n{isp.context_notice(warning)}"
+    )
 
 
 def test_a_failed_write_warns_the_user(unreachable, monkeypatch, capsys):
@@ -67,12 +69,24 @@ def test_a_failed_write_warns_the_user(unreachable, monkeypatch, capsys):
     monkeypatch.setattr(isp, "append_session_event", forbidden)
     output, err = run_main(monkeypatch, capsys)
 
-    assert output["hookSpecificOutput"]["additionalContext"] == "Team instructions."
     warning = output["systemMessage"]
     assert "could not write to Neo4j" in warning
     assert "not allowed to write" in warning
     assert "bundled prompt" not in warning
     assert "record failed" in err
+    assert output["hookSpecificOutput"]["additionalContext"] == (
+        f"Team instructions.\n\n{isp.context_notice(warning)}"
+    )
+
+
+def test_the_warning_reaches_the_model_without_a_prompt(unreachable, monkeypatch, capsys):
+    monkeypatch.setattr(isp, "read_bundled_prompt", lambda: None)
+    output, err = run_main(monkeypatch, capsys)
+
+    warning = output["systemMessage"]
+    assert "could not use Neo4j" in warning
+    assert "no prompt" in err
+    assert output["hookSpecificOutput"]["additionalContext"] == isp.context_notice(warning)
 
 
 def test_a_working_graph_shows_no_warning(unreachable, monkeypatch, capsys):
@@ -82,6 +96,7 @@ def test_a_working_graph_shows_no_warning(unreachable, monkeypatch, capsys):
     monkeypatch.setattr(isp, "link_event_to_prompt", lambda *a, **k: None)
     output, _ = run_main(monkeypatch, capsys)
     assert "systemMessage" not in output
+    assert output["hookSpecificOutput"]["additionalContext"] == "Team instructions."
 
 
 def test_the_reason_names_what_to_fix():

@@ -16,7 +16,8 @@ Resolution order:
 2. The bundled ``hooks/default_system_prompt.md`` file, when the graph
    is unreachable.
 
-If neither source yields a prompt, the hook injects nothing.
+If neither source yields a prompt, the hook injects nothing but the
+warning described below, when there is one.
 
 The SessionStart event records the prompt's name and source. When the
 prompt came from the graph, the event is also linked to the node,
@@ -31,7 +32,11 @@ session: any error falls through to the bundled default.
 A failure is still reported to the user. When the graph cannot be read, or
 the SessionStart event cannot be written to it, the hook's output carries a
 ``systemMessage``, which Claude Code shows the user as a warning and never
-passes to the model. The other hooks stay quiet, so a broken connection
+passes to the model. Not every client displays it. The terminal prints it,
+but the desktop app's Code tab (Claude Code 2.1.317) only records it in the
+transcript. The hook therefore appends the same warning to the additional
+context, with a request that the agent pass it on, so the user hears about
+it in either client. The other hooks stay quiet, so a broken connection
 produces one warning per session instead of one per event.
 """
 
@@ -166,6 +171,15 @@ def graph_warning(exc: Exception, *, writing: bool) -> str:
     )
 
 
+def context_notice(warning: str) -> str:
+    """The warning as the model reads it, for clients that hide systemMessage."""
+    return (
+        f"Session-start warning: {warning} "
+        "Not every Claude Code client displays hook warnings, so the user "
+        "may not have seen this one. Tell them about it in your first reply."
+    )
+
+
 def read_bundled_prompt() -> str | None:
     path = HOOK_DIR / "default_system_prompt.md"
     try:
@@ -211,7 +225,13 @@ def main() -> int:
                 file=sys.stderr,
             )
             if warning:
-                print(json.dumps({"systemMessage": warning}))
+                print(json.dumps({
+                    "hookSpecificOutput": {
+                        "hookEventName": "SessionStart",
+                        "additionalContext": context_notice(warning),
+                    },
+                    "systemMessage": warning,
+                }))
             return 0
         prompt, source = resolved
         session_id = str(payload.get("session_id") or "unknown")
@@ -250,10 +270,13 @@ def main() -> int:
                 print(f"[inject_system_prompt] record failed: {exc}", file=sys.stderr)
                 warning = graph_warning(exc, writing=True)
 
+        context = prompt
+        if warning:
+            context = f"{prompt.rstrip()}\n\n{context_notice(warning)}"
         output: dict = {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
-                "additionalContext": prompt,
+                "additionalContext": context,
             }
         }
         if warning:
