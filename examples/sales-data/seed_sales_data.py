@@ -6,12 +6,11 @@
 """Load the sales data behind the book's examples into Neo4j.
 
 The data belongs to an invented B2B software company that sells seats on
-a yearly or a monthly plan: its customers and their contacts, the
-subscriptions, invoices, and payments, the sales team's pipeline with
-quotes and logged activities, prospects, support tickets, the contract
-events that a data pipeline derives for the renewal dashboard, and the
-product side: features, monthly usage, and which features each customer
-adopted. Every company, person, and number is invented.
+a yearly or a monthly plan: its customers, their subscriptions and
+payments, the sales team's opportunities and quotes, support tickets,
+the seller's employees, and the contract events that a data pipeline
+derives for the renewal dashboard. The graph has ten labels. Every
+company, person, and number is invented.
 Generation is deterministic, so every run loads the same graph.
 
 The data is a snapshot as of AS_OF (August 21, 2026). It reproduces the
@@ -21,9 +20,11 @@ numbers the chapters quote:
 * Q3 2026 to date: 203 of 229 yearly customers renewed (88.6%), and
   288 of 331 customers on both plans (87.0%)
 * contract events have classified reactivated subscriptions as churn
-  since the pipeline change of March 3, 2026
-* payments carry the payment provider's customer number, which matches
-  Customer.payment_id and not Customer.customer_id
+  since the pipeline change of March 3, 2026, so the renewal dashboard
+  drops on that date
+* a payment links to the subscription it pays and to the customer that
+  paid it, and some customers' bills are paid by a parent company, so a
+  customer's own PAID_BY payments can be empty
 
 Usage (from the repository root):
     uv run --script examples/sales-data/seed_sales_data.py --dry-run   # generate and verify, write nothing
@@ -33,7 +34,7 @@ Usage (from the repository root):
 
 Connection settings come from NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD,
 and NEO4J_DATABASE, or from the matching command-line options. --reset
-deletes only nodes with the labels in SEED_LABELS, so the seed can share
+deletes only nodes with the labels in SEED_LABELS and RETIRED_LABELS, so the seed can share
 a database with the memory graph.
 """
 
@@ -47,7 +48,7 @@ import string
 import sys
 import unicodedata
 from calendar import monthrange
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
@@ -58,10 +59,14 @@ FIRST_SEED = 20260821
 ONE_DAY = timedelta(days=1)
 
 SEED_LABELS = (
-    "Customer", "Prospect", "Contact", "Employee", "Product", "Subscription",
-    "Invoice", "Payment", "Opportunity", "Quote", "Activity", "SupportTicket",
-    "ContractEvent", "PipelineChange", "Dashboard", "Feature", "UsageMonth",
+    "Customer", "Subscription", "Payment", "Opportunity", "Quote", "SupportTicket",
+    "Employee", "ContractEvent", "PipelineChange", "Dashboard",
 )
+# Labels the builder still simulates, because ticket text, prices, and the
+# shared random stream depend on them, but that simplify() leaves out of the
+# graph. Earlier versions of the seed loaded them, so --reset deletes them too.
+RETIRED_LABELS = ("Prospect", "Contact", "Activity", "Invoice", "Product", "Feature", "UsageMonth")
+RETIRED_RELS = ("SOURCED_BY",)
 
 
 @dataclass(frozen=True)
@@ -374,7 +379,7 @@ class Simulation:
         not_before = None
         if t.plan == "yearly":
             if t.idx in self.forced_yearly:
-                renew, not_before = self.forced_yearly[t.idx], w.end + ONE_DAY
+                renew = self.forced_yearly[t.idx]
             else:
                 season = 1.15 if d.month in (1, 12) else 1.0
                 renew = rng.random() >= P_CHURN_YEARLY[c.segment] * season
@@ -938,7 +943,9 @@ PIPELINE_CHANGES = (
      "Retry contract-event writes that time out during the nightly load."),
 )
 DASHBOARDS = (
-    ("DSH-001", "Customer renewals", "Renewals, reactivations, and churn per week, from contract events.", "E009"),
+    ("DSH-001", "Customer renewals",
+     "Renewals, reactivations, and churn per week, from contract events, and the renewal rate: "
+     "renewals and reactivations as a share of all three.", "E009"),
     ("DSH-002", "Pipeline coverage", "Open pipeline against quota by segment and quarter.", "E005"),
 )
 
@@ -950,6 +957,30 @@ PLANTED_TICKET = (
 )
 PLANTED_CARD_MEMO = "Customer read card 4242 4242 4242 4242 over the phone; charged manually."
 
+# Customers bought by another customer. The cancellation note names the buyer,
+# and the buyer's next term either grew by about the bought company's seats
+# (moved) or did not grow (unmoved).
+ACQUISITIONS = (
+    # period start, period end, moved, unmoved
+    (date(2026, 1, 1), date(2026, 3, 31), 3, 0),
+    (date(2026, 4, 1), date(2026, 6, 30), 0, 1),
+    (date(2026, 7, 1), AS_OF, 1, 1),
+)
+# The planted ticket goes to a customer whose yearly term ends after the snapshot and by this date.
+RENEWAL_REVIEW_END = date(2026, 9, 30)
+REVIEW_LOOKBACK = timedelta(days=90)
+# Parent companies that pay every bill of a few other customers, such as a holding
+# company paying for its brands. In the renewal group, the parent's procurement also
+# negotiates and approves its brands' renewals. Last year each brand was contacted on
+# its own, and each yearly term that ended in GROUP_LATE_RENEWALS was renewed weeks late.
+PAYER_GROUPS = 20
+GROUP_BRANDS = 2
+GROUP_LATE_RENEWALS = (date(2025, 9, 1), date(2025, 11, 30))
+GROUP_BRAND_NAMES = ("Greywell Care", "Briarwood Couriers Inc.")   # the brands chapter 4 names
+GROUP_LAPSE_NOTE = "The renewal was not signed before the term ended."
+ACQUISITION_NOTE = ("We have been acquired by {buyer}, which already uses your platform. Our team is moving "
+                    "to their account, so we will not renew this contract.")
+
 
 # ---------------------------------------------------------------------------
 # Building the graph
@@ -960,6 +991,9 @@ class Graph:
     nodes: dict[str, list[dict]] = field(default_factory=lambda: defaultdict(list))
     rels: list[tuple] = field(default_factory=list)   # (from_label, from_key, type, to_label, to_key, rows)
     rel_rows: dict[tuple, list[dict]] = field(default_factory=lambda: defaultdict(list))
+    acquired: list[tuple] = field(default_factory=list)   # (bought term, buyer's next term, seats moved)
+    payers: dict[int, list[int]] = field(default_factory=dict)   # parent: customers it pays for
+    renewal_group: tuple = ()   # (parent, account executive, [(brand, lapsed term end, late renewal, current end)])
 
     def rel(self, from_label, from_key, rel_type, to_label, to_key, src, dst, **props):
         key = (from_label, from_key, rel_type, to_label, to_key)
@@ -1092,10 +1126,11 @@ class Builder:
             return f"+61 491 570 {rng.choice(AU_FICTIONAL_MOBILES)}" if mobile else f"+61 2 5550 {rng.randint(0, 9999):04d}"
         return None
 
-    def token(self, prefix: str, n: int, used: set[str]) -> str:
+    def token(self, prefix: str, n: int, used: set[str], rng: random.Random | None = None) -> str:
         alphabet = string.ascii_letters + string.digits
+        rng = rng or self.rng
         while True:
-            t = prefix + "".join(self.rng.choice(alphabet) for _ in range(n))
+            t = prefix + "".join(rng.choice(alphabet) for _ in range(n))
             if t not in used:
                 used.add(t)
                 return t
@@ -1191,6 +1226,10 @@ class Builder:
         self.activities()
         self.tickets()
         self.crm_duplicates()
+        self.acquisitions()
+        self.renewal_paperwork()
+        self.payers()
+        simplify(self.g)
         self.g.rels = [(*k, rows) for k, rows in self.g.rel_rows.items()]
         return self.g
 
@@ -1254,10 +1293,10 @@ class Builder:
                 "industry": industry, "segment": c.segment, "region": region, "country": country,
                 "employee_count": self.employee_count(c.segment, max_seats),
                 "acquisition_channel": "self-serve" if self_serve else "sales-led",
-                "payment_id": self.token("cus_", 14, self.used_payment_ids),
+                "_payment_id": self.token("cus_", 14, self.used_payment_ids),   # not loaded; keeps the random stream
                 "phone": self.phone(country), "currency": currency,
                 "status": "active" if terms[-1].outcome is None else "churned",
-                "_base": base, "_locale": locale,
+                "_base": base, "_locale": locale, "_country": country,
             }
             if self_serve:
                 if rng.random() < 0.3:
@@ -1408,7 +1447,7 @@ class Builder:
             "customer_id": cid, "name": "INTERNAL - Sales demo tenant", "domain": "company.com",
             "segment": "Enterprise", "region": "North America", "country": "United States",
             "created_date": start, "acquisition_channel": "sales-led", "currency": "USD",
-            "payment_id": self.token("cus_", 14, self.used_payment_ids), "status": "active",
+            "_payment_id": self.token("cus_", 14, self.used_payment_ids), "status": "active",
         })
         g.nodes["Subscription"].append({
             "subscription_id": sid, "plan": "yearly", "start_date": start, "end_date": add_months(start, 12),
@@ -1506,8 +1545,8 @@ class Builder:
                 memo = rng.choice((f"Wire reference {rng.randint(10000, 99999)}",
                                    f"Paid against PO {rng.randint(4500000, 4599999)}"))
             row = {"transaction_id": self.token("txn_", 16, self.used_txn_ids),
-                   "customer_id": inv["_info"]["payment_id"], "invoice_number": inv["invoice_number"],
-                   "currency": inv["currency"], "memo": memo, **p}
+                   "invoice_number": inv["invoice_number"], "_sub": inv["_sub"],
+                   "_payer": inv["_info"]["customer_id"], "currency": inv["currency"], "memo": memo, **p}
             rows.append(row)
         rows.sort(key=lambda r: (r["payment_date"], r["transaction_id"]))
         planted = [r for r in rows if r["method"] == "card" and r["status"] == "succeeded"
@@ -2163,6 +2202,219 @@ class Builder:
             g.nodes["Contact"].append(dup)
             g.rel("Contact", "contact_id", "WORKS_AT", "Customer", "customer_id", dup["contact_id"], cid)
 
+    def acquisitions(self):
+        """Rewrite the notes of lost customers that another customer bought, as ACQUISITIONS asks.
+
+        A bought customer did not come back and had no account-risk ticket that gives another
+        reason for leaving. Its buyer is in the same country, in the same or a larger segment,
+        at least twice its size, and renewed a yearly term within 60 days of the bought
+        customer's end date. Only text changes, so the random stream and every number in
+        Table 1 stay the same.
+        """
+        sim, g = self.sim, self.g
+        subs = {s["subscription_id"]: s for s in g.nodes["Subscription"]}
+        opps = {o["opportunity_id"]: o for o in g.nodes["Opportunity"]}
+        lost_opp = {r["to"]: r["from"] for r in g.rel_rows[("Opportunity", "opportunity_id", "RENEWS",
+                                                             "Subscription", "subscription_id")]
+                    if opps[r["from"]]["stage"] == "Closed Lost"}
+        tickets = {t["ticket_id"]: t for t in g.nodes["SupportTicket"]}
+        flagged = {r["from"] for r in g.rel_rows[("Customer", "customer_id", "HAS_TICKET", "SupportTicket",
+                                                  "ticket_id")]
+                   if tickets[r["to"]]["category"] == "Account" and tickets[r["to"]]["subject"] != "Cancel auto-renewal"}
+        came_back = {t.prev for t in sim.terms if t.link == "reactivation"}
+        renewals = [t for t in sim.terms if t.link == "renewal" and t.plan == "yearly"
+                    and sim.terms[t.prev].plan == "yearly"]
+        used: set[int] = set()
+        for start, end, n_moved, n_unmoved in ACQUISITIONS:
+            pairs = []
+            for a in sim.terms:
+                if (a.plan != "yearly" or a.outcome != "cancelled" or not start <= a.end <= end
+                        or a.idx in came_back or self.cust_id[a.cust] in flagged
+                        or self.cust_info[a.cust]["_loss"][a.idx] == "Acquired"):
+                    continue
+                for n in renewals:
+                    p = sim.terms[n.prev]
+                    if (n.cust == a.cust or p.seats < 2 * a.seats
+                            or self.cust_info[n.cust]["country"] != self.cust_info[a.cust]["country"]
+                            or SEGMENT_INDEX[sim.customers[n.cust].segment] < SEGMENT_INDEX[sim.customers[a.cust].segment]
+                            or not a.end - timedelta(days=5) <= n.start <= min(a.end + timedelta(days=60), AS_OF)):
+                        continue
+                    grew = n.seats - p.seats
+                    gap = abs((n.start - a.end).days)
+                    if a.seats - 1 <= grew <= a.seats + 3:
+                        pairs.append((True, abs(grew - a.seats), gap, a.idx, n.idx))
+                    elif grew <= 0:
+                        pairs.append((False, -grew, gap, a.idx, n.idx))
+            for moved, wanted in ((True, n_moved), (False, n_unmoved)):
+                for _, _, _, ai, ni in sorted(x for x in pairs if x[0] == moved):
+                    a, n = sim.terms[ai], sim.terms[ni]
+                    if wanted == 0:
+                        break
+                    if a.cust in used or n.cust in used:
+                        continue
+                    used |= {a.cust, n.cust}
+                    wanted -= 1
+                    sid = self.sub_id[a.idx]
+                    subs[sid]["cancellation_reason"] = ACQUISITION_NOTE.format(buyer=self.cust_info[n.cust]["name"])
+                    self.cust_info[a.cust]["_loss"][a.idx] = "Acquired"
+                    if sid in lost_opp:
+                        opps[lost_opp[sid]].update(loss_reason="Acquired", competitor=None)
+                    g.acquired.append((a, n, moved))
+                if wanted:
+                    raise AssertionError(f"{start}..{end}: {wanted} acquisitions with moved={moved} did not fit")
+
+    def renewal_paperwork(self):
+        """Give the planted ticket to a customer whose yearly term ends by September 30, 2026.
+
+        The ticket arrives with renewal paperwork, so it belongs to a customer about to renew.
+        Only the ticket's links change, so the random stream stays the same.
+        """
+        sim, g = self.sim, self.g
+        tid = next(t["ticket_id"] for t in g.nodes["SupportTicket"] if t["body"] == PLANTED_TICKET[1])
+        target = next(c for c in sorted(sim.customers, key=lambda c: c.idx)
+                      if c.segment == "Mid-Market" and sim.terms[c.terms[-1]].outcome is None
+                      and sim.terms[c.terms[-1]].plan == "yearly"
+                      and AS_OF < sim.terms[c.terms[-1]].end <= RENEWAL_REVIEW_END)
+        info = self.cust_info[target.idx]
+        for r in g.rel_rows[("Customer", "customer_id", "HAS_TICKET", "SupportTicket", "ticket_id")]:
+            if r["to"] == tid:
+                r["from"] = info["customer_id"]
+        for r in g.rel_rows[("SupportTicket", "ticket_id", "OPENED_BY", "Contact", "contact_id")]:
+            if r["from"] == tid:
+                r["to"] = info["_contacts"][0][0]
+
+    def payers(self):
+        """Let parent companies pay their subsidiaries' bills, then link every payment.
+
+        A parent is a holding company: a Mid-Market or Enterprise customer named "... Group",
+        on yearly terms since before HISTORY_START, that never lapsed. It pays every bill of
+        two to five customers in its country that are no larger, are not groups themselves,
+        started after it, and have a term since HISTORY_START, so those customers have no
+        payments of their own on PAID_BY. The first parent is the renewal group: it pays for
+        GROUP_BRANDS US brands that one account executive owns, whose yearly terms ended in
+        GROUP_LATE_RENEWALS without a renewal and were renewed weeks late, and whose current
+        terms end after the renewal review and by the end of 2026. Their lapsed terms get
+        GROUP_LAPSE_NOTE in place of a reason for leaving. Customers that other planted
+        records name are left out. Only payments and those two notes change, and a separate
+        random stream keeps every other record the same.
+        """
+        sim, g = self.sim, self.g
+        rng = random.Random(sim.diagnostics["seed"] * 7 + 3)
+        owner = {r["to"]: r["from"] for r in g.rel_rows[("Customer", "customer_id", "HAS_SUBSCRIPTION",
+                                                         "Subscription", "subscription_id")]}
+        tickets = {t["ticket_id"]: t for t in g.nodes["SupportTicket"]}
+        domains = Counter(c["domain"] for c in g.nodes["Customer"])
+        named = {self.cust_id[t.cust] for a, n, _ in g.acquired for t in (a, n)}
+        named |= {owner[s["subscription_id"]] for s in g.nodes["Subscription"]
+                  if "acquired" in (s.get("cancellation_reason") or "").lower()}
+        named |= {r["from"] for r in g.rel_rows[("Customer", "customer_id", "HAS_TICKET", "SupportTicket", "ticket_id")]
+                  if tickets[r["to"]]["body"] == PLANTED_TICKET[1]}
+        named |= {c["customer_id"] for c in g.nodes["Customer"] if domains[c["domain"]] > 1}
+        customers = [c for c in sorted(sim.customers, key=lambda c: c.idx) if self.cust_id[c.idx] not in named
+                     and not self.cust_info[c.idx]["_base"].endswith(" Group")]
+        terms = lambda c: [sim.terms[ti] for ti in c.terms]
+        country = lambda c: self.cust_info[c.idx]["_country"]
+        candidates = [c for c in sorted(sim.customers, key=lambda c: c.idx)
+                      if self.cust_id[c.idx] not in named and c.legacy and c.segment != "SMB"
+                      and terms(c)[-1].outcome is None and self.cust_info[c.idx]["_base"].endswith(" Group")
+                      and all(t.plan == "yearly" and t.link in (None, "renewal") for t in terms(c))]
+
+        def pool(parent, taken):
+            return [c for c in customers if c.idx not in taken and country(c) == country(parent)
+                    and SEGMENT_INDEX[c.segment] <= SEGMENT_INDEX[parent.segment]
+                    and c.first_start >= parent.first_start
+                    and any(t.start >= HISTORY_START for t in terms(c))]
+
+        def late_renewal(c):
+            return next((t for t in terms(c) if t.link == "reactivation" and sim.terms[t.prev].plan == "yearly"
+                         and GROUP_LATE_RENEWALS[0] <= sim.terms[t.prev].end <= GROUP_LATE_RENEWALS[1]
+                         and self.late_renewal(sim.terms[t.prev], t)), None)
+
+        by_ae = defaultdict(list)
+        for c in customers:
+            current = terms(c)[-1]
+            if (country(c) == "United States" and c.segment == "SMB" and current.plan == "yearly"
+                    and current.outcome is None and RENEWAL_REVIEW_END < current.end <= date(2026, 12, 31)
+                    and self.cust_info[c.idx].get("_ae") and late_renewal(c)):
+                by_ae[self.cust_info[c.idx]["_ae"]].append(c)
+        ae = min((a for a, cs in by_ae.items() if len(cs) >= GROUP_BRANDS), key=lambda a: (-len(by_ae[a]), a))
+        brands = sorted(by_ae[ae], key=lambda c: terms(c)[-1].end)[:GROUP_BRANDS]
+        group_parent = rng.choice([c for c in candidates if country(c) == "United States"
+                                   and all(c.first_start <= b.first_start for b in brands)])
+        chosen = [group_parent] + rng.sample([c for c in candidates if c is not group_parent], PAYER_GROUPS - 1)
+        taken = {c.idx for c in chosen} | {b.idx for b in brands}
+        groups = {group_parent.idx: brands}
+        for parent in chosen[1:]:
+            groups[parent.idx] = rng.sample(pool(parent, taken), rng.randint(2, 5))
+            taken |= {c.idx for c in groups[parent.idx]}
+        payer = {self.cust_id[c.idx]: self.cust_id[p] for p, subs in groups.items() for c in subs}
+        for p in g.nodes["Payment"]:
+            p["_payer"] = payer.get(p["_payer"], p["_payer"])
+            g.rel("Payment", "transaction_id", "PAYS", "Subscription", "subscription_id", p["transaction_id"], p["_sub"])
+            g.rel("Payment", "transaction_id", "PAID_BY", "Customer", "customer_id", p["transaction_id"], p["_payer"])
+        g.payers = {self.cust_id[p]: [self.cust_id[c.idx] for c in subs] for p, subs in groups.items()}
+        late = {b.idx: late_renewal(b) for b in brands}
+        lapsed = {self.sub_id[t.prev] for t in late.values()}
+        for s in g.nodes["Subscription"]:
+            if s["subscription_id"] in lapsed:
+                s["cancellation_reason"] = GROUP_LAPSE_NOTE
+        g.renewal_group = (self.cust_id[group_parent.idx], ae, [
+            (self.cust_id[b.idx], sim.terms[late[b.idx].prev].end, late[b.idx].start, terms(b)[-1].end) for b in brands])
+
+def simplify(g: Graph):
+    """Move what the ten labels need from the retired labels into properties, then drop the retired ones.
+
+    Opportunities at prospects, and their quotes, go with the prospects.
+    Every record that stays is the same as in the full simulation.
+    """
+    def links(src: str, rel_type: str, dst: str) -> list[dict]:
+        return [r for k, rows in g.rel_rows.items() if (k[0], k[2], k[3]) == (src, rel_type, dst) for r in rows]
+
+    contacts = {c["contact_id"]: c for c in g.nodes["Contact"]}
+    main_contact: dict[int, dict] = {}
+    for r in links("Contact", "WORKS_AT", "Customer"):
+        c, current = contacts[r["from"]], main_contact.get(r["to"])
+        if current is None or (current["status"] != "active" and c["status"] == "active"):
+            main_contact[r["to"]] = c
+    for cust in g.nodes["Customer"]:
+        if c := main_contact.get(cust["customer_id"]):
+            cust["contact_name"], cust["contact_phone"] = c["name"], c["phone"]
+    opened_by = {r["from"]: contacts[r["to"]] for r in links("SupportTicket", "OPENED_BY", "Contact")}
+    for t in g.nodes["SupportTicket"]:
+        c = opened_by[t["ticket_id"]]
+        t["requester_name"], t["requester_email"] = c["name"], c["email"]
+
+    products = {p["product_id"]: p for p in g.nodes["Product"]}
+    for label, key in (("Subscription", "subscription_id"), ("Quote", "quote_id")):
+        lines = defaultdict(list)
+        for r in links(label, "INCLUDES", "Product"):
+            lines[r["from"]].append((products[r["to"]], r["props"]))
+        for n in g.nodes[label]:
+            items = lines.get(n[key], [])
+            edition = next(((p, props) for p, props in items if p["type"] == "edition"), None)
+            n["edition"] = edition[0]["name"] if edition else None
+            n["add_ons"] = [p["name"] for p, _ in items if p["type"] == "add-on"]
+            if edition and label == "Subscription":
+                n["seat_list_price"], n["seat_price"] = edition[1]["list_price"], edition[1]["unit_price"]
+            elif edition:
+                n["seats"] = edition[1]["quantity"]
+    for p in g.nodes["Payment"]:
+        del p["invoice_number"]
+
+    prospect_opps = {r["to"] for r in links("Prospect", "HAS_OPPORTUNITY", "Opportunity")}
+    gone = {"Opportunity": prospect_opps,
+            "Quote": {r["to"] for r in links("Opportunity", "HAS_QUOTE", "Quote") if r["from"] in prospect_opps}}
+    for label, ids in gone.items():
+        g.nodes[label] = [n for n in g.nodes[label] if n[KEYS[label]] not in ids]
+    for label in RETIRED_LABELS:
+        del g.nodes[label]
+    for k in list(g.rel_rows):
+        if k[0] in RETIRED_LABELS or k[3] in RETIRED_LABELS or k[2] in RETIRED_RELS:
+            del g.rel_rows[k]
+        else:
+            g.rel_rows[k] = [r for r in g.rel_rows[k]
+                             if r["from"] not in gone.get(k[0], ()) and r["to"] not in gone.get(k[3], ())]
+
 
 def clean(row: dict) -> dict:
     return {k: v for k, v in row.items() if v is not None and not k.startswith("_")}
@@ -2173,20 +2425,21 @@ def clean(row: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 KEYS = {
-    "Customer": "customer_id", "Prospect": "prospect_id", "Contact": "contact_id",
-    "Employee": "employee_id", "Product": "product_id", "Subscription": "subscription_id",
-    "Invoice": "invoice_number", "Payment": "transaction_id", "Opportunity": "opportunity_id",
-    "Quote": "quote_id", "Activity": "activity_id",
-    "SupportTicket": "ticket_id", "ContractEvent": "event_id", "PipelineChange": "version",
-    "Dashboard": "dashboard_id", "Feature": "feature_id", "UsageMonth": "usage_id",
+    "Customer": "customer_id", "Subscription": "subscription_id", "Payment": "transaction_id",
+    "Opportunity": "opportunity_id", "Quote": "quote_id", "SupportTicket": "ticket_id",
+    "Employee": "employee_id", "ContractEvent": "event_id", "PipelineChange": "version",
+    "Dashboard": "dashboard_id",
 }
 INDEXES = (
-    "CREATE CONSTRAINT customer_payment_id IF NOT EXISTS FOR (c:Customer) REQUIRE c.payment_id IS UNIQUE",
-    "CREATE INDEX payment_customer_id IF NOT EXISTS FOR (p:Payment) ON (p.customer_id)",
-    "CREATE INDEX payment_invoice_number IF NOT EXISTS FOR (p:Payment) ON (p.invoice_number)",
+    "CREATE INDEX payment_date IF NOT EXISTS FOR (p:Payment) ON (p.payment_date)",
     "CREATE INDEX subscription_end_date IF NOT EXISTS FOR (s:Subscription) ON (s.end_date)",
     "CREATE INDEX contract_event_date IF NOT EXISTS FOR (e:ContractEvent) ON (e.date)",
     "CREATE INDEX usage_month IF NOT EXISTS FOR (u:UsageMonth) ON (u.month)",
+)
+# Schema that earlier versions created for joining payments on the provider's customer number.
+RETIRED_SCHEMA = (
+    "DROP CONSTRAINT customer_payment_id IF EXISTS",
+    "DROP INDEX payment_customer_id IF EXISTS",
 )
 
 
@@ -2201,14 +2454,16 @@ def connect(args):
 
 
 def existing_seed_nodes(session) -> int:
-    query = " UNION ALL ".join(f"MATCH (n:{label}) RETURN count(n) AS n" for label in SEED_LABELS)
+    query = " UNION ALL ".join(f"MATCH (n:{label}) RETURN count(n) AS n" for label in SEED_LABELS + RETIRED_LABELS)
     return sum(r["n"] for r in session.run(query))
 
 
 def reset(session):
-    for label in SEED_LABELS:
+    for label in SEED_LABELS + RETIRED_LABELS:
         while session.run(f"MATCH (n:{label}) WITH n LIMIT 10000 DETACH DELETE n RETURN count(*) AS n").single()["n"]:
             pass
+    for stmt in RETIRED_SCHEMA:
+        session.run(stmt).consume()
 
 
 def load(session, graph: Graph):
@@ -2237,6 +2492,29 @@ WITH c, collect(s.status) AS statuses
 RETURN count(c) AS due,
        count(CASE WHEN all(x IN statuses WHERE x = 'renewed') THEN 1 END) AS renewed
 """
+PAID_FOR_QUERY = """
+MATCH (c:Customer)-[:HAS_SUBSCRIPTION]->(:Subscription)<-[:PAYS]-(p:Payment)-[:PAID_BY]->(payer:Customer)
+WHERE payer <> c
+RETURN count(p) AS payments, count(DISTINCT c) AS customers, count(DISTINCT payer) AS payers
+"""
+REVIEW_PAYMENTS_QUERY = """
+MATCH (c:Customer)-[:HAS_SUBSCRIPTION]->(s:Subscription)
+WHERE date($as_of) < s.end_date <= date($review_end)
+WITH DISTINCT c
+MATCH (c)-[:HAS_SUBSCRIPTION]->(:Subscription)<-[:PAYS]-(p:Payment)
+WHERE p.status = 'failed' AND p.payment_date >= date($as_of) - duration('P90D')
+RETURN count(DISTINCT c) AS customers, count(p) AS payments
+"""
+GROUP_QUERY = """
+MATCH (b:Customer)-[:HAS_SUBSCRIPTION]->(:Subscription)<-[:PAYS]-(:Payment)-[:PAID_BY]->(parent:Customer)
+WHERE b.customer_id IN $brands
+WITH DISTINCT parent, b
+MATCH (b)-[:HAS_OPPORTUNITY]->(o:Opportunity {type: 'Renewal', stage: 'Closed Won'})-[:RENEWS]->(s:Subscription)
+WHERE o.close_date > s.end_date
+RETURN parent.name AS parent, b.name AS brand, s.end_date AS ended, o.close_date AS closed,
+       duration.inDays(s.end_date, o.close_date).days AS days_late
+ORDER BY ended
+"""
 
 
 def check(session):
@@ -2246,14 +2524,19 @@ def check(session):
             r = session.run(RATE_QUERY, {"from": str(w.start), "to": str(w.end), "plan": plan}).single()
             rate = 100 * r["renewed"] / r["due"] if r["due"] else 0
             print(f"  {plan or 'all plans':10} {r['renewed']:4} of {r['due']:4} renewed  {rate:5.1f}%")
-    wrong = session.run("MATCH (p:Payment) MATCH (c:Customer) WHERE c.customer_id = p.customer_id "
-                        "RETURN count(*) AS n").single()["n"]
-    right = session.run("MATCH (p:Payment) MATCH (c:Customer) WHERE c.payment_id = p.customer_id "
-                        "RETURN count(*) AS n").single()["n"]
-    total = session.run("MATCH (p:Payment) RETURN count(p) AS n").single()["n"]
-    print("Payments joined to customers")
-    print(f"  on Customer.customer_id: {wrong} of {total} payments match")
-    print(f"  on Customer.payment_id:  {right} of {total} payments match")
+    r = session.run(PAID_FOR_QUERY).single()
+    print("Payments made by another customer")
+    print(f"  {r['payments']} payments for {r['customers']} customers, paid by {r['payers']} parents")
+    r = session.run(REVIEW_PAYMENTS_QUERY, as_of=str(AS_OF), review_end=str(RENEWAL_REVIEW_END)).single()
+    print(f"Customers due {AS_OF + ONE_DAY} to {RENEWAL_REVIEW_END} with a failed payment since "
+          f"{AS_OF - REVIEW_LOOKBACK}")
+    print(f"  {r['customers']} customers, {r['payments']} failed payments")
+    print("Late renewals of brands whose bills a parent pays")
+    brands = session.run("MATCH (c:Customer) WHERE c.name IN $names RETURN collect(c.customer_id) AS ids",
+                         names=list(GROUP_BRAND_NAMES)).single()["ids"]
+    for r in session.run(GROUP_QUERY, brands=brands):
+        print(f"  {r['brand']:30} paid by {r['parent']}, term ended {r['ended']}, renewal closed {r['closed']}"
+              f" ({r['days_late']} days late)")
     print("Contract events on reactivated subscriptions")
     for r in session.run(
         "MATCH (e:ContractEvent)-[:FOR_SUBSCRIPTION]->(s:Subscription {term_type: 'reactivation'}) "
@@ -2267,10 +2550,59 @@ def check(session):
 
 # ---------------------------------------------------------------------------
 
+def finance_rates(sim: Simulation, graph: Graph, start: date, end: date) -> tuple[int, int, int]:
+    """Customers due, kept when every bought customer counts as kept, and kept when only those whose seats moved do."""
+    due, renewed = renewal_rates(sim.terms, start, end)["all"]
+    bought = [moved for a, _, moved in graph.acquired if start <= a.end <= end]
+    return due, renewed + len(bought), renewed + sum(bought)
+
+
+def dashboard_rate(graph: Graph, start: date, end: date) -> float:
+    """The renewal dashboard's rate over [start, end]: renewals and reactivations over all three."""
+    n = defaultdict(int)
+    for e in graph.nodes["ContractEvent"]:
+        if start <= e["date"] <= end:
+            n[e["type"]] += 1
+    kept = n["renewal"] + n["reactivation"]
+    return kept / (kept + n["churn"])
+
+
+def dashboard_drop(graph: Graph) -> tuple[float, float]:
+    """The dashboard's rate in the eight weeks before and the eight weeks from the pipeline change."""
+    weeks = timedelta(weeks=8)
+    return (dashboard_rate(graph, PIPELINE_BUG_DATE - weeks, PIPELINE_BUG_DATE - ONE_DAY),
+            dashboard_rate(graph, PIPELINE_BUG_DATE, PIPELINE_BUG_DATE + weeks - ONE_DAY))
+
+
+def review_payments(graph: Graph) -> tuple[int, int]:
+    """Customers due in the renewal review with a failed payment in the lookback, and the number of those payments.
+
+    A customer's payments are reached through its subscriptions, because another customer can pay its bills.
+    """
+    owner = {r["to"]: r["from"] for r in graph.rel_rows[
+        ("Customer", "customer_id", "HAS_SUBSCRIPTION", "Subscription", "subscription_id")]}
+    pays = {r["from"]: r["to"] for r in graph.rel_rows[
+        ("Payment", "transaction_id", "PAYS", "Subscription", "subscription_id")]}
+    due = {owner[s["subscription_id"]] for s in graph.nodes["Subscription"]
+           if AS_OF < s["end_date"] <= RENEWAL_REVIEW_END}
+    hits = [owner[pays[p["transaction_id"]]] for p in graph.nodes["Payment"]
+            if p["status"] == "failed" and p["payment_date"] >= AS_OF - REVIEW_LOOKBACK
+            and owner[pays[p["transaction_id"]]] in due]
+    return len(set(hits)), len(hits)
+
+
 def generate() -> tuple[Simulation, Graph]:
     sim = simulate()
     verify(sim)
-    return sim, Builder(sim).build()
+    graph = Builder(sim).build()
+    before, after = dashboard_drop(graph)
+    if after > before - 0.05:
+        raise AssertionError(f"renewal dashboard: {before:.1%} before {PIPELINE_BUG_DATE}, {after:.1%} after")
+    names = {c["customer_id"]: c["name"] for c in graph.nodes["Customer"]}
+    _, _, brands = graph.renewal_group
+    if tuple(names[b] for b, *_ in brands) != GROUP_BRAND_NAMES:
+        raise AssertionError(f"renewal group: brands {[names[b] for b, *_ in brands]}, the book names {GROUP_BRAND_NAMES}")
+    return sim, graph
 
 
 def summary(sim: Simulation, graph: Graph):
@@ -2279,6 +2611,23 @@ def summary(sim: Simulation, graph: Graph):
         rates = renewal_rates(sim.terms, w.start, w.end)
         parts = [f"{k} {r} of {d} ({100 * r / d:.1f}%)" for k, (d, r) in rates.items()]
         print(f"  {w.name}: " + ", ".join(parts))
+    before, after = dashboard_drop(graph)
+    for start, end, *_ in ACQUISITIONS:
+        due, every, moved = finance_rates(sim, graph, start, end)
+        print(f"  Bought customers kept, {start} to {end}: all of them {every} of {due} ({100 * every / due:.1f}%), "
+              f"seats moved {moved} of {due} ({100 * moved / due:.1f}%)")
+    print(f"  Renewal dashboard: {before:.1%} in the eight weeks before {PIPELINE_BUG_DATE}, "
+          f"{after:.1%} in the eight weeks from it")
+    names = {c["customer_id"]: c["name"] for c in graph.nodes["Customer"]}
+    paid_for = sum(len(subs) for subs in graph.payers.values())
+    print(f"  Payers: {len(graph.payers)} parents pay every bill of {paid_for} other customers")
+    parent, ae, brands = graph.renewal_group
+    print(f"  Renewal group: {names[parent]} ({parent}) pays for and approves the renewals of brands owned by {ae}")
+    for brand, ended, renewed, current_end in brands:
+        print(f"    {names[brand]} ({brand}): term ended {ended}, renewed {renewed} ({(renewed - ended).days} days late), "
+              f"current term ends {current_end}")
+    customers, failed = review_payments(graph)
+    print(f"  Renewal review: {customers} customers due with {failed} failed payments since {AS_OF - REVIEW_LOOKBACK}")
     print("Nodes: " + ", ".join(f"{label} {len(rows)}" for label, rows in graph.nodes.items()))
     print(f"Relationships: {sum(len(r[-1]) for r in graph.rels)}")
 
