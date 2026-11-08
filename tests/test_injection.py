@@ -56,6 +56,7 @@ def test_an_empty_graph_is_seeded_once_from_the_bundled_default(graph, agent):
 
 def test_the_event_names_the_prompt_and_links_to_it(graph, agent, monkeypatch, capsys):
     out = run_hook(isp.main, start(), monkeypatch, capsys)
+    assert "systemMessage" not in json.loads(out.out)
     injected = json.loads(out.out)["hookSpecificOutput"]
     assert injected["hookEventName"] == "SessionStart"
     assert injected["additionalContext"] == isp.read_bundled_prompt()
