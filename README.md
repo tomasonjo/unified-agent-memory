@@ -129,9 +129,28 @@ sister project uses:
 
 ```
 (:Session)-[:FIRST_EVENT]->(:SessionEvent)-[:NEXT]->(:SessionEvent)-...
-(:Session)-[:HAS_EVENT]->(every :SessionEvent)
-(:Session)-[:LATEST_EVENT]->(the newest :SessionEvent)
+(:Session)-[:HAS_EVENT]->(every main-agent :SessionEvent)
+(:Session)-[:LATEST_EVENT]->(the newest main-agent :SessionEvent)
 ```
+
+A subagent's events (those that carry an `agent_id`) form a branch of
+their own, with no relationship to the session. The branch starts at the
+subagent's `SubagentStart`. The `Agent` call's `PostToolUse`, which names
+the subagent in `tool_response.agentId`, links to that start, and the
+subagent's `SubagentStop` links to the event that delivered its report:
+the same `PostToolUse` for a foreground subagent, the prompt the harness
+submits for a background one. A subagent whose report never arrives has
+no `RETURNED_TO`.
+
+```
+(Agent call's PostToolUse)-[:SPAWNED]->(:SessionEvent {SubagentStart})
+(SubagentStart)-[:NEXT]->(subagent event)-[:NEXT]->...
+(SubagentStart)-[:BRANCH_LATEST]->(the branch's newest event)
+(SubagentStop)-[:RETURNED_TO]->(the event that delivered its report)
+```
+
+A `SubagentStop` with no start to join, as the harness's own
+prompt-suggestion agent fires after every turn, stays on the main chain.
 
 Each event's id is a hash of its content, so the same payload delivered to
 two parallel hook configs collapses to one node. The content includes the
@@ -289,7 +308,7 @@ search_episodic(query) to find more.
 After the memory server's `search_episodic` and `expand_episodic` it
 records what they returned. Every delivery is kept on the event that
 carried it, block and all, with `(memory)-[:INJECTED_AT]->(event)` for
-each memory it names; the session is one `HAS_EVENT` hop away. Every
+each memory it names; the event's `session_id` names the session. Every
 `SessionStart`, including a resume, clear, or compact, gets its own recap
 and its own record, and so does each restart of a background session:
 the supervisor stops an idle one after about an hour and resumes it on

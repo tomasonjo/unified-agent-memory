@@ -211,6 +211,33 @@ def prompt_origin(prompt) -> str:
     return match.group(1) if match and match.group(1) in HARNESS_PROMPT_TAGS else "user"
 
 
+# The sender of each report a submitted prompt carries: the agent named by an
+# <agent-message from="...">, or the task id of a <task-notification>, which
+# for a background subagent is its agent id.
+_REPORT_SENDER = re.compile(
+    r'<agent-message\b[^>]*?\bfrom="([^"]+)"'
+    r"|<task-notification>(?:(?!</task-notification>).)*?<task-id>\s*([^<\s]+)\s*</task-id>",
+    re.DOTALL,
+)
+
+
+def delivered_agent_ids(prompt) -> list[str]:
+    """Ids of the agents whose reports a harness-submitted prompt delivers.
+
+    One prompt can carry several reports. Empty for a prompt the user
+    typed. The id of a background task that is not a subagent, such as a
+    shell, matches no ``SubagentStop``, so it links nothing.
+    """
+    if not isinstance(prompt, str) or prompt_origin(prompt) == "user":
+        return []
+    ids: list[str] = []
+    for agent, task in _REPORT_SENDER.findall(prompt):
+        sender = agent or task
+        if sender not in ids:
+            ids.append(sender)
+    return ids
+
+
 def _transcript_model(transcript_path) -> str:
     """Model of the last assistant message in the session transcript.
 
@@ -291,6 +318,52 @@ SESSION_SCHEMA = (
 )
 
 
+# Range indexes for the lookups that cannot start from the Session. A
+# subagent's branch has no relationship to the session, so the append finds
+# the branch, and the Agent call that started it, by the events' own
+# properties. Each entry is (name, label, properties, statement).
+SESSION_INDEXES = (
+    (
+        "uam_event_session",
+        "SessionEvent",
+        ("session_id",),
+        "CREATE INDEX uam_event_session IF NOT EXISTS "
+        "FOR (e:SessionEvent) ON (e.session_id)",
+    ),
+    (
+        "uam_event_agent",
+        "SessionEvent",
+        ("session_id", "agent_id", "event_name"),
+        "CREATE INDEX uam_event_agent IF NOT EXISTS "
+        "FOR (e:SessionEvent) ON (e.session_id, e.agent_id, e.event_name)",
+    ),
+    (
+        "uam_event_spawned",
+        "SessionEvent",
+        ("session_id", "spawned_agent_id"),
+        "CREATE INDEX uam_event_spawned IF NOT EXISTS "
+        "FOR (e:SessionEvent) ON (e.session_id, e.spawned_agent_id)",
+    ),
+)
+
+
+def _range_indexes(session) -> set[tuple[str, tuple[str, ...]]] | None:
+    """(label, properties) of the range indexes that already exist, or
+    ``None`` when the user may not list indexes."""
+    try:
+        records = session.run(
+            "SHOW INDEXES YIELD type, labelsOrTypes, properties "
+            "WHERE type = 'RANGE' RETURN labelsOrTypes, properties"
+        )
+        return {
+            (labels[0], tuple(props))
+            for labels, props in (tuple(r.values()) for r in records)
+            if labels and props
+        }
+    except Exception:
+        return None
+
+
 def _unique_keys(session) -> set[tuple[str, str]] | None:
     """(label, property) pairs that already carry a uniqueness guarantee.
 
@@ -314,7 +387,8 @@ def _unique_keys(session) -> set[tuple[str, str]] | None:
 
 
 def _ensure_session_schema(session) -> None:
-    """Create the uniqueness constraints, tolerating pre-existing schema.
+    """Create the uniqueness constraints and the range indexes, tolerating
+    pre-existing schema.
 
     This runs on every captured event, so the common case, where all of
     them exist, costs one listing instead of one statement per constraint.
@@ -340,6 +414,14 @@ def _ensure_session_schema(session) -> None:
             session.run(statement).consume()
         except Exception as exc:
             print(f"[uam] schema: {name} not created: {exc}", file=sys.stderr)
+    indexed = _range_indexes(session)
+    for name, label, props, statement in SESSION_INDEXES:
+        if indexed is not None and (label, props) in indexed:
+            continue
+        try:
+            session.run(statement).consume()
+        except Exception as exc:
+            print(f"[uam] schema: {name} not created: {exc}", file=sys.stderr)
 
 
 # The owner and project are written once, when the session is created, and
@@ -354,7 +436,18 @@ def _ensure_session_schema(session) -> None:
 # asking for the exclusive one, deadlocked, and backed off until the
 # driver's retry window ran out: 43 of 1,126 events in a burst from 100
 # agents were lost that way.
-APPEND_EVENT = """
+#
+# A subagent's events (they carry ``agent_id``) go on a branch of their own
+# instead of the session's chain. The branch starts at the subagent's
+# SubagentStart, which keeps a BRANCH_LATEST pointer at the branch's tail,
+# and has no relationship to the Session: FIRST_EVENT, LATEST_EVENT, and
+# HAS_EVENT reach the main agent's events only. An event with an
+# ``agent_id`` but no branch to join (the harness's own agents, such as
+# prompt suggestions, fire SubagentStop without a start) stays on the main
+# chain. The prefix takes the lock and reports whether the event is a
+# duplicate and whether its branch exists; the append and the links run
+# in the same transaction, so the lock covers them too.
+APPEND_PREFIX = """
 MERGE (s:Session {session_id: $session_id})
 ON CREATE SET s.created_at = datetime($timestamp)
 SET s._uam_lock = true
@@ -378,8 +471,14 @@ FOREACH (_ IN CASE WHEN NOT EXISTS { (:Project)-[:HAS_SESSION]->(s) }
 )
 WITH s
 OPTIONAL MATCH (dup:SessionEvent {event_id: $event_id})
-WITH s, dup
-WHERE dup IS NULL
+OPTIONAL MATCH (root:SessionEvent {session_id: $session_id, agent_id: $agent_id,
+                                   event_name: 'SubagentStart'})-[:BRANCH_LATEST]->()
+RETURN dup IS NOT NULL AS duplicate, root IS NOT NULL AS branch
+LIMIT 1
+"""
+
+APPEND_MAIN = """
+MATCH (s:Session {session_id: $session_id})
 CREATE (e:SessionEvent $event_props)
 SET e.timestamp = datetime($timestamp)
 CREATE (s)-[:HAS_EVENT]->(e)
@@ -396,11 +495,59 @@ FOREACH (_ IN CASE WHEN prev IS NULL THEN [1] ELSE [] END |
 CREATE (s)-[:LATEST_EVENT]->(e)
 """
 
+APPEND_BRANCH = """
+CREATE (e:SessionEvent $event_props)
+SET e.timestamp = datetime($timestamp)
+WITH e
+OPTIONAL MATCH (root:SessionEvent {session_id: $session_id, agent_id: $agent_id,
+                                   event_name: 'SubagentStart'})
+               -[old:BRANCH_LATEST]->(tail:SessionEvent)
+DELETE old
+WITH e, root, tail
+FOREACH (_ IN CASE WHEN tail IS NOT NULL THEN [1] ELSE [] END |
+    CREATE (tail)-[:NEXT]->(e)
+    CREATE (root)-[:BRANCH_LATEST]->(e)
+)
+FOREACH (_ IN CASE WHEN tail IS NULL THEN [1] ELSE [] END |
+    CREATE (e)-[:BRANCH_LATEST]->(e)
+)
+"""
+
+# The Agent call's PostToolUse names the subagent it started
+# (``spawned_agent_id``), and the subagent's SubagentStart begins its
+# branch. Whichever of the two is appended second writes the link, since
+# either can land first. A branch gets one SPAWNED, from the first call
+# that names it.
+LINK_SPAWN = """
+MATCH (start:SessionEvent {session_id: $session_id, agent_id: $agent_id,
+                           event_name: 'SubagentStart'})-[:BRANCH_LATEST]->()
+WHERE NOT EXISTS { ()-[:SPAWNED]->(start) }
+MATCH (call:SessionEvent {session_id: $session_id, spawned_agent_id: $agent_id})
+WITH start, call ORDER BY call.timestamp LIMIT 1
+MERGE (call)-[:SPAWNED]->(start)
+"""
+
+# Written when the event that delivers a report is appended: the Agent
+# call's PostToolUse for a foreground subagent, the prompt the harness
+# submits for a background one. The link starts at that agent's latest
+# SubagentStop; a report that arrives before its stop gets none.
+LINK_RETURN = """
+MATCH (delivery:SessionEvent {event_id: $event_id})
+UNWIND $agent_ids AS agent_id
+MATCH (stop:SessionEvent {session_id: $session_id, agent_id: agent_id,
+                          event_name: 'SubagentStop'})
+WITH delivery, agent_id, stop ORDER BY stop.timestamp DESC
+WITH delivery, agent_id, head(collect(stop)) AS stop
+MERGE (stop)-[:RETURNED_TO]->(delivery)
+"""
+
 
 def _append_event(tx, event_props: dict, project: str, model: str | None) -> None:
-    tx.run(
-        APPEND_EVENT,
-        session_id=event_props["session_id"],
+    session_id = event_props["session_id"]
+    agent_id = event_props.get("agent_id")
+    state = tx.run(
+        APPEND_PREFIX,
+        session_id=session_id,
         user_id=event_props.get("user_id"),
         project_id=project,
         harness=harness(),
@@ -408,8 +555,33 @@ def _append_event(tx, event_props: dict, project: str, model: str | None) -> Non
         job_id=job_id(),
         timestamp=event_props.get("timestamp"),
         event_id=event_props.get("event_id"),
+        agent_id=agent_id,
+    ).single()
+    if state is None or state["duplicate"]:
+        return
+    starts = event_props.get("event_name") == "SubagentStart"
+    in_branch = bool(agent_id) and (state["branch"] or starts)
+    tx.run(
+        APPEND_BRANCH if in_branch else APPEND_MAIN,
+        session_id=session_id,
+        agent_id=agent_id,
+        timestamp=event_props.get("timestamp"),
         event_props=event_props,
     ).consume()
+    spawned = event_props.get("spawned_agent_id")
+    if spawned or (starts and in_branch and not state["branch"]):
+        tx.run(LINK_SPAWN, session_id=session_id, agent_id=spawned or agent_id).consume()
+    if spawned and event_props.get("spawn_status") == "completed":
+        returned = [spawned]
+    else:
+        returned = event_props.get("delivered_agent_ids") or []
+    if returned:
+        tx.run(
+            LINK_RETURN,
+            session_id=session_id,
+            event_id=event_props.get("event_id"),
+            agent_ids=list(returned),
+        ).consume()
 
 
 def event_record(session_id: str, event_name: str, props: dict) -> tuple[str, dict]:
@@ -505,9 +677,17 @@ def append_session_event(session_id: str, event_name: str, props: dict) -> str:
     graph shape mirrors the meta-knowledge-graph sister project::
 
         (:Session)-[:FIRST_EVENT]->(:SessionEvent)-[:NEXT]->(:SessionEvent)...
-        (:Session)-[:HAS_EVENT]->(every :SessionEvent)
-        (:Session)-[:LATEST_EVENT]->(the newest :SessionEvent)
+        (:Session)-[:HAS_EVENT]->(every main-agent :SessionEvent)
+        (:Session)-[:LATEST_EVENT]->(the newest main-agent :SessionEvent)
         (:User)-[:HAS_SESSION]->(:Session)<-[:HAS_SESSION]-(:Project)
+
+    A subagent's events form a branch of their own, which has no
+    relationship to the Session::
+
+        (Agent call's PostToolUse)-[:SPAWNED]->(:SessionEvent {SubagentStart})
+        (SubagentStart)-[:NEXT]->(subagent event)-[:NEXT]->...
+        (SubagentStart)-[:BRANCH_LATEST]->(the branch's newest event)
+        (SubagentStop)-[:RETURNED_TO]->(the event that delivered its report)
 
     The event id is a hash of the event's own content (timestamp excluded),
     so the same payload delivered to two parallel hook configs collapses to

@@ -42,7 +42,9 @@ chapter:
 ```
 (:User {user_id})-[:HAS_SESSION]->(:Session)
 (:Project {id, name})-[:HAS_SESSION]->(:Session)
-(:Session)-[:HAS_EVENT|FIRST_EVENT|LATEST_EVENT]->(:SessionEvent)   // chapter 2, unchanged
+(:Session)-[:HAS_EVENT|FIRST_EVENT|LATEST_EVENT]->(:SessionEvent)   // chapter 2: main-agent events
+(:SessionEvent)-[:SPAWNED]->(:SessionEvent)       // Agent call -> subagent branch start
+(:SessionEvent)-[:RETURNED_TO]->(:SessionEvent)   // SubagentStop -> report delivery
 (:Project)-[:HAS_OBSERVATION]->(:Observation)
 (:Project)-[:LATEST_OBSERVATION]->(:Observation)
 (:Observation)-[:NEXT]->(:Observation)            // project timeline, insertion order
@@ -452,8 +454,9 @@ properties on it:
    says what was shown, and the memory node is the current record.
 3. Return the block.
 
-"Which sessions received this account?" is one `HAS_EVENT` hop from the
-events. "What was delivered during this window?" is the `INJECTED_AT`
+"Which sessions received this account?" is the events' `session_id`; a
+main-agent event is also one `HAS_EVENT` hop from its session, while a
+subagent's event sits on a branch with no link to it. "What was delivered during this window?" is the `INJECTED_AT`
 links on the window's events, which is how extraction lists recalled
 memory for its prompt and checks `cites`.
 

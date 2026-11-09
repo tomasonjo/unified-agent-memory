@@ -14,8 +14,16 @@ payload from stdin and appends one :SessionEvent to the per-session chain,
 the same episodic shape the meta-knowledge-graph sister project uses::
 
     (:Session)-[:FIRST_EVENT]->(:SessionEvent)-[:NEXT]->(:SessionEvent)...
-    (:Session)-[:HAS_EVENT]->(every :SessionEvent)
-    (:Session)-[:LATEST_EVENT]->(the newest :SessionEvent)
+    (:Session)-[:HAS_EVENT]->(every main-agent :SessionEvent)
+    (:Session)-[:LATEST_EVENT]->(the newest main-agent :SessionEvent)
+
+A subagent's events go on a branch of their own, which starts at its
+SubagentStart. The Agent call's PostToolUse names the subagent it started
+(``spawned_agent_id``) and links to the branch with SPAWNED; the
+subagent's SubagentStop links with RETURNED_TO to the event that delivered
+its report: that PostToolUse for a foreground subagent
+(``spawn_status`` ``completed``), the prompt the harness submits for a
+background one (``delivered_agent_ids``). See common.APPEND_PREFIX.
 
 Storage decisions:
 - Tool results are NOT stored. They are the bulk of a session and they are
@@ -97,6 +105,7 @@ if str(HOOK_DIR) not in sys.path:
 
 from common import (  # noqa: E402
     append_session_event,
+    delivered_agent_ids,
     in_llm_subprocess,
     load_env,
     prompt_origin,
@@ -177,12 +186,34 @@ def _cron_line(cron: dict) -> str:
     return f"{cron.get('schedule') or '?'} ({when}): {cron.get('prompt') or ''}"
 
 
+def _spawn(data: dict) -> dict:
+    """The subagent an Agent call started, read from its response.
+
+    ``tool_response.agentId`` names it, and ``status`` says how it ran:
+    ``completed`` for a foreground subagent, whose result the response
+    carries, ``async_launched`` for one that went to the background.
+    """
+    if data.get("tool_name") != "Agent":
+        return {}
+    response = data.get("tool_response")
+    if isinstance(response, str):
+        try:
+            response = json.loads(response)
+        except ValueError:
+            return {}
+    if not isinstance(response, dict):
+        return {}
+    agent_id = response.get("agentId") or response.get("agent_id")
+    return {"agent_id": str(agent_id), "status": response.get("status")} if agent_id else {}
+
+
 def build_event_props(data: dict) -> dict:
     """Flatten the hook payload into :SessionEvent properties."""
     event_name = data.get("hook_event_name")
     response = data.get("tool_response")
     prompt = data.get("prompt")
     tool_event = "tool_name" in data
+    spawn = _spawn(data)
     # Background work is the parent session's, so only the main agent's
     # Stop records it: every SubagentStop of a workflow carries the same
     # list again.
@@ -203,6 +234,10 @@ def build_event_props(data: dict) -> dict:
         # session as submitted prompts; see common.prompt_origin.
         "prompt_origin": (prompt_origin(prompt)
                           if event_name == "UserPromptSubmit" and prompt else None),
+        # The agents whose reports a submitted prompt delivers, read before
+        # the prompt is cut to MAX_FIELD_CHARS.
+        "delivered_agent_ids": (delivered_agent_ids(prompt) or None
+                                if event_name == "UserPromptSubmit" else None),
         # UserPromptExpansion: the command a typed prompt expanded.
         "expansion_type": data.get("expansion_type"),
         "command_name": data.get("command_name"),
@@ -232,6 +267,10 @@ def build_event_props(data: dict) -> dict:
         "agent_id": data.get("agent_id"),
         "agent_type": data.get("agent_type"),
         "agent_transcript_path": data.get("agent_transcript_path"),
+        # The Agent call's PostToolUse: the subagent it started, and whether
+        # it ran in the foreground (completed) or went to the background.
+        "spawned_agent_id": spawn.get("agent_id"),
+        "spawn_status": spawn.get("status"),
         # TaskCreated and TaskCompleted.
         "task_id": data.get("task_id"),
         "task_subject": data.get("task_subject"),

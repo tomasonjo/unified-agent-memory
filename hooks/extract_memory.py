@@ -289,8 +289,11 @@ RETURN CASE WHEN m:Observation THEN m.display_id ELSE s.display_id END AS displa
        channels
 """
 
+# By the events' session_id rather than HAS_EVENT, so a memory delivered to a
+# subagent's memory-tool call, on a branch the session has no link to, stays
+# citable: the subagent's report can quote its id to the main agent.
 DELIVERED_TO_SESSION = """
-MATCH (:Session {session_id: $session_id})-[:HAS_EVENT]->(:SessionEvent)<-[:INJECTED_AT]-(m)
+MATCH (e:SessionEvent {session_id: $session_id})<-[:INJECTED_AT]-(m)
 WITH DISTINCT m
 OPTIONAL MATCH (s:Session)-[:HAS_SUMMARY]->(m)
 RETURN CASE WHEN m:Observation THEN m.display_id ELSE s.display_id END AS display_id

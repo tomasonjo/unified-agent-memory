@@ -21,8 +21,10 @@ the standard library alone.
 The recall hooks use the same rows. A delivery (a recap, or what
 ``search_episodic`` and ``expand_episodic`` returned) is recorded on the
 event that carried it: the exact block on the event, plus
-``(memory)-[:INJECTED_AT]->(event)`` per delivered memory. The session is
-one ``HAS_EVENT`` hop away.
+``(memory)-[:INJECTED_AT]->(event)`` per delivered memory. The event's
+``session_id`` names the session; a main-agent event is also one
+``HAS_EVENT`` hop from it, while a subagent's sits on a branch that has no
+relationship to the session.
 """
 
 from __future__ import annotations
@@ -587,7 +589,7 @@ OPTIONAL MATCH (s)-[:HAS_SUMMARY]->(sum:SessionSummary)
 RETURN s {.session_id, .display_id, .user_id, .created_at} AS s,
        sum {.headline, .request, .progress, .outcome,
             .version, .source_end} AS sum,
-       COUNT { (s)-[:HAS_EVENT]->() } AS event_count
+       COUNT { MATCH (e:SessionEvent) WHERE e.session_id = s.session_id } AS event_count
 LIMIT 1
 """
 
@@ -614,10 +616,13 @@ RETURN e.event_id AS event_id
 EVENT_FIELDS = """e {.event_id, .event_name, .timestamp, .tool_name, .prompt,
           .tool_input, .tool_error, .last_assistant_message, .delta, .agent_type,
           .source, .prompt_name, .recall_channel} AS e,
-       e.recall_block IS NOT NULL AS delivered"""
+       e.recall_block IS NOT NULL AS delivered,
+       [(e)-[:SPAWNED]->(b) | {agent_id: b.agent_id, start: b.event_id}] AS spawned,
+       [(b)-[:RETURNED_TO]->(e) | b.agent_id] AS returned_from"""
 
 _EVENTS = """
-MATCH (:Session {{session_id: $key}})-[:HAS_EVENT]->(start:SessionEvent {{event_id: $event_id}})
+MATCH (start:SessionEvent {{event_id: $event_id}})
+WHERE start.session_id = $key
 MATCH path = (start)-[:NEXT*{low}..{high}]->(e:SessionEvent)
 RETURN {fields}
 ORDER BY length(path)
@@ -700,8 +705,19 @@ def render_session(
     return "\n".join(lines)
 
 
-def render_event(e: dict, delivered: bool) -> str:
-    """One captured event: time · name · [tool ·] excerpt · [delivery]."""
+def render_event(
+    e: dict,
+    delivered: bool,
+    spawned: list[dict] | None = None,
+    returned_from: list[str] | None = None,
+    session_ref: str | None = None,
+) -> str:
+    """One captured event: time · name · [tool ·] excerpt · [delivery].
+
+    An Agent call that started a subagent says how to page the subagent's
+    own events, which sit on a branch off this chain; the event that
+    delivered a subagent's report names that subagent.
+    """
     when = _native(e.get("timestamp"))
     name = e.get("event_name") or "?"
     parts = [when.strftime("%Y-%m-%d %H:%M:%S") if when else "undated", name]
@@ -723,6 +739,12 @@ def render_event(e: dict, delivered: bool) -> str:
         parts.append(f"[system prompt {e['prompt_name']} injected]")
     if delivered:
         parts.append(f"[memory delivered: {e.get('recall_channel') or 'recall'}]")
+    for branch in spawned or []:
+        where = (f': expand_episodic("{session_ref}", events=true, '
+                 f'cursor="{branch["start"]}")' if session_ref else "")
+        parts.append(f"[started subagent {branch['agent_id']}{where}]")
+    for agent_id in returned_from or []:
+        parts.append(f"[report of subagent {agent_id}]")
     return " · ".join(parts)
 
 
@@ -734,10 +756,13 @@ def events_page(
     start: str | None = None,
     cursor: str | None = None,
     run_id: str | None = None,
+    session_ref: str | None = None,
 ) -> str:
     """A page of captured events, from ``start`` or after ``cursor``.
 
     With ``run_id`` the page stays inside that extraction run's window.
+    A cursor on a subagent's branch pages that branch. ``session_ref``,
+    the session's id for ``expand_episodic``, defaults to ``name``.
     """
     if run_id:
         queries = (WINDOW_EVENTS_FROM, WINDOW_EVENTS_AFTER)
@@ -757,7 +782,12 @@ def events_page(
             start = first[0]["event_id"]
         rows = run(queries[0], event_id=start, **params)
     page, more = rows[:EVENT_PAGE], len(rows) > EVENT_PAGE
-    lines = [header] + [render_event(row["e"], row["delivered"]) for row in page]
+    ref = session_ref or name
+    lines = [header] + [
+        render_event(row["e"], row["delivered"], row.get("spawned"),
+                     row.get("returned_from"), ref)
+        for row in page
+    ]
     if more:
         lines.append(
             f'More: expand_episodic("{name}", events=true, '
@@ -814,6 +844,7 @@ def expand(
             start=start[0]["event_id"] if start else None,
             cursor=cursor,
             run_id=produced_by.get("id") if start else None,
+            session_ref=_ref(session.get("display_id"), session["session_id"]),
         )
         return bound(page, EXPAND_OUTPUT_CHARS)
     rows = run(EXPAND_SESSION, key=key)
