@@ -7,14 +7,10 @@ description: Carry out a multi-phase task by deploying subagents. Use when asked
 
 You are an orchestrator. Do no implementation work yourself.
 
-Before the first phase, recall what memory holds about this task: prior
-attempts, known constraints, decisions already made. Split what you find
-by phase.
-
 For each phase, deploy a subagent with one clear objective, the relevant
-plan step, and only the memory that phase needs. Require evidence back:
+plan step, and only the context that phase needs. Require evidence back:
 commands run, files changed, tests passing. Verify the evidence before
 moving on.
 
-When the last phase lands, record what future sessions should know: what
-worked, what failed, and any constraint discovered along the way.
+When the last phase lands, state in your final reply what worked, what
+failed, and any constraint discovered along the way.

@@ -24,8 +24,8 @@ system, one piece per chapter of the book it accompanies:
    episodes on its own.
 
 It also ships one skill. `/orchestrate` turns the agent into a subagent
-orchestrator: recall memory before the work starts, route the relevant
-slice into each phase, and record what was learned at the end.
+orchestrator: hand each phase only the context it needs, verify the
+evidence between phases, and state what was learned in the final reply.
 
 And it mounts memory back into the session as tools: `mcp.json` runs the
 plugin's own `memory` MCP server. It offers `search_episodic` and
@@ -324,12 +324,15 @@ by name or the model matches the task to the description.
 
 **`orchestrate`** is instructions, not code. It makes the agent delegate a
 multi-phase plan to subagents. Subagents start with an empty context, so
-the orchestrator's job is routing memory: recall what is relevant before
-the work, hand each phase only the slice it needs, verify evidence between
-phases, and record lessons when the last phase lands. Capture needs no
-help from the skill: `SubagentStart` and `SubagentStop` are among the
-events `log_event.py` already writes down, and a background subagent's
-report reaches consolidation labeled as the subagent's.
+the orchestrator's job is routing: hand each phase only the context it
+needs, verify evidence between phases, and state the lessons in the final
+reply when the last phase lands. The skill has no recall step of its own,
+because the standing prompt's first principle already tells the agent to
+check injected context and available memory in every session. Capture
+needs no help from the skill either. The final reply is captured with the
+`Stop` event, `SubagentStart` and `SubagentStop` are among the events
+`log_event.py` already writes down, and a background subagent's report
+reaches consolidation labeled as the subagent's.
 
 The skill format and the pairing of memory hooks with skills follow
 [claude-mem](https://github.com/thedotmack/claude-mem), whose `do` and
